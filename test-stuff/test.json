@@ -1,0 +1,17 @@
+{
+    "playlists": [
+        {
+            "title": "Focus Mix",
+            "songs": [
+                {
+                    "title": "electronic",
+                    "artist": "DJ Robo"
+                },
+                {
+                    "title": "vocal",
+                    "artist": "Mr. Focus"
+                }
+            ]
+        }
+    ]
+}

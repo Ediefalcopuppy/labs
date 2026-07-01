@@ -1,0 +1,36 @@
+AI Topic Exploration
+
+Topic I Chose
+Inner workings of GPU
+
+Why I Chose It
+Interesting
+
+First Explanation Using An ELI5 Prompt
+Explain the inner workings of a GPU like I'm 5 years old
+
+Vocabulary I Learned
+Workgroup Processor
+
+Best Analogy Or Example
+Think of a modern GPU as a throughput engine: it is not built to make one task finish with the lowest possible latency, like a high-end CPU core. It is built to keep thousands of tiny operations moving at once, especially when those operations are similar and run over large arrays of pixels, vertices, particles, matrix elements, or neural-network activations.
+
+Misconceptions Or Surprises
+I didn't know how different different GPU chips really are from each other
+
+My Teach-Back
+A CPU core executes an instruction stream.
+
+A GPU "core" is usually just one lane that helps execute
+one instruction stream shared by many lanes.
+
+What I Still Do Not Understand
+The purpose of things like ray accelerators because I think that the gpu could probably do those calculations on normal cores with better instructions
+
+Three Better Questions I Could Ask Next
+Can't GPU cores just do ray-tracing math?
+How does frame generation work?
+Whats the difference between a WP core and a CUDA core?
+
+Verification Notes
+It linked the Nvidia docs and the AMD documentation 
