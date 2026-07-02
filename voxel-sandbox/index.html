@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Voxel Sandbox</title>
+  </head>
+  <body>
+    <main id="app"></main>
+
+    <div id="crosshair" aria-hidden="true">
+      <span class="crosshair-line crosshair-line-x"></span>
+      <span class="crosshair-line crosshair-line-y"></span>
+    </div>
+
+    <section id="hud" aria-label="World status">
+      <div id="meters">
+        <span id="coords">0 0 0</span>
+        <span id="block-count">0</span>
+      </div>
+      <div id="inventory" aria-label="Block inventory"></div>
+    </section>
+
+    <section id="menu" aria-label="Game menu">
+      <div class="menu-panel">
+        <h1>Voxel Sandbox</h1>
+        <button id="enter-world" type="button">Enter world</button>
+      </div>
+    </section>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

@@ -1,0 +1,17 @@
+{
+  "student_name": "Maya Johnson",
+  "grade_level": 8,
+  "favorite_subject": "Science",
+  "uses_voice_mode": true,
+  "daily_study_minutes": 45,
+  "favorite_tools": [
+    "calendar",
+    "weather",
+    "notes"
+  ],
+  "preferences": {
+    "response_style": "clear and direct",
+    "include_examples": true,
+    "max_answer_length": "medium"
+  }
+}

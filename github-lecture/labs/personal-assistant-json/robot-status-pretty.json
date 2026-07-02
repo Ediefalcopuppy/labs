@@ -1,0 +1,24 @@
+{
+  "robot_id": "RX-204",
+  "battery_percentage": 87,
+  "online_status": true,
+  "current_location": {
+    "room": "Science Lab",
+    "floor": 2,
+    "coordinates": {
+      "x": 14.5,
+      "y": 8.2
+    }
+  },
+  "sensor_readings": {
+    "temperature_celsius": 22.4,
+    "humidity_percent": 41,
+    "motion_detected": false
+  },
+  "active_tasks": [
+    "scan classroom",
+    "deliver supplies",
+    "return to charging dock"
+  ],
+  "last_command_received": "Begin afternoon patrol"
+}
