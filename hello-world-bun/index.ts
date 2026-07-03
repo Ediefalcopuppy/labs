@@ -1,62 +1,29 @@
-type Idea = {
-  prompt: string;
-  twist: string;
-  buildTimeMinutes: number;
-};
+console.log("Welcome to the Bun TypeScript hello world program!");
 
-const prompts = [
-  "A desk plant that logs its daily mood",
-  "A timer that names each focus session",
-  "A recipe bot for suspiciously empty fridges",
-  "A tiny atlas of imaginary neighborhoods",
-  "A command-line postcard maker",
-  "A habit tracker for delightfully specific rituals",
-];
+const username = prompt("What is your name? ") ?? "friend";
 
-const twists = [
-  "must fit in one screen",
-  "prints a tiny ASCII receipt at the end",
-  "uses only the current time as input",
-  "has three modes: practical, poetic, and chaotic",
-  "gives every result a dramatic title",
-  "ends with one useful next step",
-];
+console.log(`Hello, ${username}! Nice to meet you.`);
 
-function hashSeed(seed: string): number {
-  return [...seed].reduce((hash, char) => {
-    return (hash * 31 + char.charCodeAt(0)) >>> 0;
-  }, 17);
+const firstNumber = Math.floor(Math.random() * 10) + 1;
+const secondNumber = Math.floor(Math.random() * 10) + 1;
+const operators = ["+", "-", "*"];
+const operator = operators[Math.floor(Math.random() * operators.length)];
+
+let correctAnswer: number;
+
+if (operator === "+") {
+  correctAnswer = firstNumber + secondNumber;
+} else if (operator === "-") {
+  correctAnswer = firstNumber - secondNumber;
+} else {
+  correctAnswer = firstNumber * secondNumber;
 }
 
-function pick<T>(items: T[], seed: number, offset: number): T {
-  return items[(seed + offset) % items.length];
+const userAnswer = prompt(`Quick math question: What is ${firstNumber} ${operator} ${secondNumber}? `);
+const numericAnswer = Number(userAnswer);
+
+if (numericAnswer === correctAnswer) {
+  console.log(`Great job, ${username}! You got it right.`);
+} else {
+  console.log(`Nice try, ${username}. The correct answer was ${correctAnswer}.`);
 }
-
-function makeIdea(seedText: string): Idea {
-  const seed = hashSeed(seedText);
-
-  return {
-    prompt: pick(prompts, seed, 0),
-    twist: pick(twists, seed, 3),
-    buildTimeMinutes: 15 + (seed % 46),
-  };
-}
-
-function renderIdea(idea: Idea, seedText: string): string {
-  return [
-    "Tiny TypeScript Idea Machine",
-    "============================",
-    `Seed: ${seedText}`,
-    "",
-    `Build: ${idea.prompt}`,
-    `Rule: It ${idea.twist}.`,
-    `Timebox: ${idea.buildTimeMinutes} minutes`,
-    "",
-    "First move: create the smallest version that makes you smile.",
-  ].join("\n");
-}
-
-const seedText = Bun.argv.slice(2).join(" ") || new Date().toDateString();
-const idea = makeIdea(seedText);
-
-console.log(renderIdea(idea, seedText));
