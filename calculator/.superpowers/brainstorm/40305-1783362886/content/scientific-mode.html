@@ -1,0 +1,66 @@
+<h2>How should scientific mode appear?</h2>
+<p class="subtitle">Pick the interaction that best fits the calculator you want.</p>
+
+<div class="cards">
+  <div class="card" data-choice="segmented" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div class="mockup">
+        <div class="mockup-header">Basic / Scientific segmented control</div>
+        <div class="mockup-body">
+          <div style="border-radius:28px;background:#e7f0ff;padding:6px;display:flex;gap:6px;width:240px;margin:auto">
+            <div style="border-radius:24px;background:#fff;padding:10px 22px;box-shadow:0 2px 10px rgba(0,0,0,.12)">Basic</div>
+            <div style="border-radius:24px;padding:10px 18px;color:#375274">Scientific</div>
+          </div>
+          <div style="margin:22px auto 0;display:grid;grid-template-columns:repeat(4,48px);gap:10px;width:max-content">
+            <div class="placeholder">7</div><div class="placeholder">8</div><div class="placeholder">9</div><div class="placeholder">÷</div>
+            <div class="placeholder">4</div><div class="placeholder">5</div><div class="placeholder">6</div><div class="placeholder">×</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>Segmented Toggle</h3>
+      <p>Always visible, clear, and fast. Scientific buttons slide in when selected.</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="expand" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div class="mockup">
+        <div class="mockup-header">Expandable scientific tray</div>
+        <div class="mockup-body">
+          <button class="mock-button" style="border-radius:28px;background:#d9f3e4;color:#143923">Show scientific</button>
+          <div style="margin:18px auto 0;display:grid;grid-template-columns:repeat(5,44px);gap:8px;width:max-content">
+            <div class="placeholder">sin</div><div class="placeholder">cos</div><div class="placeholder">tan</div><div class="placeholder">log</div><div class="placeholder">π</div>
+          </div>
+          <div style="margin:14px auto 0;display:grid;grid-template-columns:repeat(4,48px);gap:10px;width:max-content">
+            <div class="placeholder">7</div><div class="placeholder">8</div><div class="placeholder">9</div><div class="placeholder">÷</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>Expandable Tray</h3>
+      <p>Basic calculator remains dominant. Scientific tools unfold as a secondary panel.</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="drawer" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div class="mockup">
+        <div class="mockup-header">Settings-style mode sheet</div>
+        <div class="mockup-body">
+          <div style="border-radius:28px;background:#f5e6ff;padding:16px;max-width:270px;margin:auto">
+            <h3 style="margin:0 0 12px">Calculator mode</h3>
+            <div class="option" style="margin:0 0 8px"><div class="letter">✓</div><div class="content"><p>Basic</p></div></div>
+            <div class="option" style="margin:0"><div class="letter">fx</div><div class="content"><p>Scientific</p></div></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>Mode Sheet</h3>
+      <p>Cleaner face, but one extra step. Feels more like an Android settings surface.</p>
+    </div>
+  </div>
+</div>
