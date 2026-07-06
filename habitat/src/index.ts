@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 import { Command, InvalidArgumentError } from "commander";
+import { randomUUID } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
@@ -20,10 +21,64 @@ type Door = {
   airlockName?: string;
 };
 
+type StarterModuleInstance = {
+  id: string;
+  blueprintId: string;
+  displayName: string;
+  connectedTo: string[];
+  runtimeAttributes: Record<string, unknown>;
+  capabilities: string[];
+};
+
+type ProductionBlueprint = {
+  id?: string;
+  blueprintId: string;
+  displayName: string;
+  description?: string;
+  status?: string;
+  output?: Record<string, unknown>;
+  inputs?: Record<string, unknown>;
+  productionCost?: Record<string, unknown>;
+  requiredFacility?: Record<string, unknown>;
+  buildTicks?: number;
+  prerequisites?: string[];
+  unlocks?: string[];
+  repeatable?: boolean;
+  level?: number | null;
+  target?: Record<string, unknown>;
+  facilityLevel?: Record<string, unknown>;
+  attachmentPoints?: Record<string, unknown>;
+  attachmentRequirements?: Record<string, unknown>[];
+  runtimeAttributes?: Record<string, unknown>;
+  capabilities?: string[];
+};
+
+type KeplerHabitat = {
+  id: string;
+  habitatSlug: string;
+  displayName: string;
+  catalogVersion: string;
+  status: string;
+  lastSeenAt?: string | null;
+};
+
+type KeplerRegistration = {
+  habitatUuid: string;
+  displayName: string;
+  habitatId: string;
+  planetBaseUrl: string;
+  starterModules: StarterModuleInstance[];
+  blueprints: ProductionBlueprint[];
+  habitat?: KeplerHabitat;
+  registeredAt: string;
+  lastSyncedAt: string;
+};
+
 type HabitatData = {
   zones: Zone[];
   airlocks: Airlock[];
   doors: Door[];
+  registration?: KeplerRegistration;
 };
 
 const dataDir = join(process.cwd(), ".habitat");
@@ -48,6 +103,10 @@ function normalizeData(data: unknown): HabitatData {
     zones: Array.isArray(candidate.zones) ? candidate.zones : [],
     airlocks: Array.isArray(candidate.airlocks) ? candidate.airlocks : [],
     doors: Array.isArray(candidate.doors) ? candidate.doors : [],
+    registration:
+      candidate.registration && typeof candidate.registration === "object"
+        ? (candidate.registration as KeplerRegistration)
+        : undefined,
   };
 }
 
@@ -131,6 +190,87 @@ function parseLocked(value: string): boolean {
   throw new InvalidArgumentError("locked must be true or false.");
 }
 
+function getPlanetBaseUrl(): string {
+  return (
+    process.env.KEPLER_PLANET_BASE_URL ??
+    process.env.KEPLER_WORLD_BASE_URL ??
+    process.env.PLANET_SERVER_PUBLIC_BASE_URL ??
+    "https://planet.turingguild.com"
+  ).replace(/\/+$/, "");
+}
+
+function getPlanetToken(): string {
+  const token =
+    process.env.KEPLER_PLANET_TOKEN ??
+    process.env.KEPLER_WORLD_TOKEN ??
+    process.env.PLANET_TOKEN;
+
+  if (!token) {
+    program.error(
+      "Missing Kepler bearer token. Set KEPLER_PLANET_TOKEN, KEPLER_WORLD_TOKEN, or PLANET_TOKEN.",
+    );
+    throw new Error("Unreachable after Commander exits.");
+  }
+
+  return token;
+}
+
+async function requestKepler<T>(
+  path: string,
+  options: {
+    method: "GET" | "POST" | "DELETE";
+    body?: unknown;
+    baseUrl?: string;
+  },
+): Promise<T | undefined> {
+  const baseUrl = options.baseUrl ?? getPlanetBaseUrl();
+  const headers = new Headers({
+    Authorization: `Bearer ${getPlanetToken()}`,
+  });
+
+  if (options.body !== undefined) {
+    headers.set("Content-Type", "application/json");
+  }
+
+  let response: Response;
+
+  try {
+    response = await fetch(`${baseUrl}${path}`, {
+      method: options.method,
+      headers,
+      body: options.body === undefined ? undefined : JSON.stringify(options.body),
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    program.error(`Could not reach Kepler at ${baseUrl}: ${message}`);
+    throw new Error("Unreachable after Commander exits.");
+  }
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    program.error(
+      `Kepler request failed: ${options.method} ${path} returned ${response.status}${errorText ? `: ${errorText}` : ""}`,
+    );
+    throw new Error("Unreachable after Commander exits.");
+  }
+
+  if (response.status === 204) {
+    return undefined;
+  }
+
+  return (await response.json()) as T;
+}
+
+type HabitatRegistrationResponse = {
+  habitatId: string;
+  starterModules: StarterModuleInstance[];
+  blueprints: ProductionBlueprint[];
+};
+
+type HabitatResponse = {
+  habitat: KeplerHabitat;
+};
+
 const program = new Command();
 
 program
@@ -152,6 +292,9 @@ Object schemas:
   door:    { name: string, airlockName?: string }
 
 Command map:
+  habitat register --name <habitat name>
+  habitat status
+  habitat unregister
   habitat zone create <name> --purpose <purpose> --status <status>
   habitat zone list
   habitat zone show <name>
@@ -170,6 +313,8 @@ Command map:
   habitat door delete <name>
 
 Common workflow:
+  habitat register --name "Artemis Ridge"
+  habitat status
   habitat zone create kitchen --purpose cooking --status active
   habitat airlock create main --pressure-level 2.5 --locked true
   habitat door create outer
@@ -179,7 +324,12 @@ Common workflow:
 
 Data:
   Stored in .habitat/data.json in the current working directory.
-  The file shape is { "zones": [], "airlocks": [], "doors": [] }.
+  The file shape is { "zones": [], "airlocks": [], "doors": [], "registration": {} }.
+  Kepler tokens are read from env and are never stored in this file.
+
+Kepler auth:
+  Set KEPLER_PLANET_TOKEN, KEPLER_WORLD_TOKEN, or PLANET_TOKEN.
+  Optional base URL env: KEPLER_PLANET_BASE_URL, KEPLER_WORLD_BASE_URL, or PLANET_SERVER_PUBLIC_BASE_URL.
 `,
   );
 
@@ -188,6 +338,144 @@ program.on("command:*", ([command]) => {
     code: "commander.unknownCommand",
   });
 });
+
+program
+  .command("register")
+  .description("Register this habitat with Kepler.")
+  .requiredOption("-n, --name <habitatName>", "habitat display name")
+  .addHelpText(
+    "after",
+    `
+Sends exactly these OpenAPI request keys:
+  { "displayName": string, "habitatUuid": uuid }
+
+Stores returned habitatId, starterModules, and blueprints in .habitat/data.json.
+`,
+  )
+  .action(async (options: { name: string }) => {
+    const data = await readData();
+
+    if (data.registration) {
+      program.error(
+        `This directory is already registered as '${data.registration.displayName}' (${data.registration.habitatId}).`,
+      );
+    }
+
+    const planetBaseUrl = getPlanetBaseUrl();
+    const habitatUuid = randomUUID();
+    const now = new Date().toISOString();
+    const response = await requestKepler<HabitatRegistrationResponse>(
+      "/habitats/register",
+      {
+        method: "POST",
+        baseUrl: planetBaseUrl,
+        body: {
+          displayName: options.name,
+          habitatUuid,
+        },
+      },
+    );
+
+    if (!response) {
+      program.error("Kepler did not return registration data.");
+      throw new Error("Unreachable after Commander exits.");
+    }
+
+    data.registration = {
+      habitatUuid,
+      displayName: options.name,
+      habitatId: response.habitatId,
+      planetBaseUrl,
+      starterModules: response.starterModules,
+      blueprints: response.blueprints,
+      registeredAt: now,
+      lastSyncedAt: now,
+    };
+    await writeData(data);
+
+    console.log(`Registered habitat '${options.name}'.`);
+    console.log(`Habitat ID: ${response.habitatId}`);
+    console.log(`Starter modules: ${response.starterModules.length}`);
+    console.log(`Blueprints: ${response.blueprints.length}`);
+  });
+
+program
+  .command("status")
+  .description("Show Kepler registration status for this habitat.")
+  .addHelpText(
+    "after",
+    `
+Requires an existing local registration from habitat register.
+Fetches GET /habitats/{habitatId}/registration and updates local registration metadata.
+`,
+  )
+  .action(async () => {
+    const data = await readData();
+
+    if (!data.registration) {
+      console.log("Not registered with Kepler.");
+      return;
+    }
+
+    const response = await requestKepler<HabitatResponse>(
+      `/habitats/${encodeURIComponent(data.registration.habitatId)}/registration`,
+      {
+        method: "GET",
+        baseUrl: data.registration.planetBaseUrl,
+      },
+    );
+
+    if (!response) {
+      program.error("Kepler did not return habitat status data.");
+      throw new Error("Unreachable after Commander exits.");
+    }
+
+    data.registration.habitat = response.habitat;
+    data.registration.lastSyncedAt = new Date().toISOString();
+    await writeData(data);
+
+    console.log(`Registration: registered`);
+    console.log(`Display name: ${response.habitat.displayName}`);
+    console.log(`Habitat ID: ${response.habitat.id}`);
+    console.log(`Slug: ${response.habitat.habitatSlug}`);
+    console.log(`Status: ${response.habitat.status}`);
+    console.log(`Catalog version: ${response.habitat.catalogVersion}`);
+    console.log(`Last seen: ${response.habitat.lastSeenAt ?? "never"}`);
+    console.log(`Base URL: ${data.registration.planetBaseUrl}`);
+  });
+
+program
+  .command("unregister")
+  .description("Delete this habitat registration from Kepler.")
+  .addHelpText(
+    "after",
+    `
+Sends DELETE /habitats/{habitatId}.
+On 204 success, clears only the local Kepler registration metadata.
+Local zones, airlocks, and doors remain in .habitat/data.json.
+`,
+  )
+  .action(async () => {
+    const data = await readData();
+
+    if (!data.registration) {
+      console.log("Not registered with Kepler.");
+      return;
+    }
+
+    const { habitatId, displayName, planetBaseUrl } = data.registration;
+
+    await requestKepler<void>(`/habitats/${encodeURIComponent(habitatId)}`, {
+      method: "DELETE",
+      baseUrl: planetBaseUrl,
+    });
+
+    delete data.registration;
+    await writeData(data);
+
+    console.log(`Unregistered habitat '${displayName}'.`);
+    console.log(`Habitat ID: ${habitatId}`);
+  });
 
 const zone = new Command("zone")
   .description("Manage zones.")
