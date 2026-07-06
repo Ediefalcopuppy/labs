@@ -39,3 +39,39 @@ The help descriptions for each command
 Commands
 ---
 
+`fubar device list`
+>What did the command show?
+
+```
+Devices
+┌────┬──────┬──────┬────────┬───────┐
+│ ID │ Name │ Type │ Online │ Power │
+└────┴──────┴──────┴────────┴───────┘
+```
+>Did it confirm or change your theory about fubar?
+
+It sort of confirmed it, but there were no devices listed.
+
+>What would you try next?
+
+Adding a device somehow.
+
+`fubar status`
+>What did the command show?
+```md
+No homes yet. Create one with `fubar home create "My Home"`.
+```
+
+>Did it confirm or change your theory about fubar?
+
+It confirmed that fubar is used for managing smart homes, as it suggested creating a home.
+
+>What would you try next?
+
+Adding a home using the suggested command.
+
+
+`fubar home create "My Home"`
+
+I think that this command will add a home to the home list.
+
