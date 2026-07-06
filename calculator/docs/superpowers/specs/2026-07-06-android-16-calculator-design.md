@@ -19,6 +19,7 @@ Included:
 - Keyboard input whenever the calculator page is focused.
 - Snappy, modern animations for button presses, tray expansion, menu collapse, display changes, and error feedback.
 - Reduced-motion handling for users who prefer less animation.
+- Light and dark themes, with dark mode available from the UI and automatic initial theme selection from the user's system preference.
 
 Not included:
 
@@ -36,8 +37,20 @@ The app should borrow Android 16 / Material 3 Expressive cues without copying an
 - Expressive accent colors for operator, equals, and scientific controls.
 - High contrast text with a calm calculator-focused layout.
 - Responsive sizing that works on desktop and phone-width browser windows.
+- A dark theme that keeps the Android 16-inspired color and depth while reducing glare. Dark mode should use deep surfaces, softened borders, luminous accents, and readable contrast rather than simply inverting the light palette.
 
 The main view should not feel like a marketing page. The calculator itself is the first screen.
+
+## Theme Design
+
+The app should support both light and dark mode.
+
+- On first load, the app follows `prefers-color-scheme`.
+- A visible theme button lets the user switch between light and dark mode.
+- The selected theme is stored locally so the choice persists across reloads.
+- Theme changes animate quickly through color, surface, and shadow transitions.
+- Dark mode preserves the same layout, controls, keyboard behavior, and scientific tray interactions as light mode.
+- Theme colors must maintain readable contrast for display text, button labels, active states, focus states, and errors.
 
 ## Interaction Design
 
@@ -86,6 +99,7 @@ The calculator logic should be separated from DOM event wiring where practical:
 - Input actions handle digits, operators, clear, delete, evaluate, and scientific functions.
 - A small parser/evaluator handles supported expressions without using `eval`.
 - UI rendering reads calculator state and updates display, tray state, and button accessibility attributes.
+- Theme state reads the system preference, applies the user's saved override when present, and updates the root document theme attribute.
 
 ## Error Handling
 
@@ -104,6 +118,7 @@ The app should handle invalid inputs gracefully:
 - Keyboard input does not trap focus.
 - Visible focus styling is preserved.
 - Color is not the only signal for active or error states.
+- The theme toggle has an accessible label that reflects the next available action, such as `Switch to dark mode`.
 
 ## Testing
 
@@ -125,5 +140,6 @@ Manual verification should cover:
 - Basic calculations with mouse and keyboard.
 - Expanding and collapsing the `fx` tray.
 - Expanding and collapsing the second scientific menu.
+- Switching between light and dark mode.
 - Responsive layout at desktop and narrow mobile widths.
 - Reduced-motion behavior through browser or OS settings when available.
