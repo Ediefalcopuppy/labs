@@ -141,16 +141,45 @@ program
   .addHelpText(
     "after",
     `
-Examples:
-  habitat zone create kitchen --purpose cooking --status active
+Agent quick reference:
+  Use --help on any command group or subcommand for arguments and options.
+  Data is scoped to the current working directory.
+  Unknown commands return a friendly error and suggest the relevant --help command.
+
+Object schemas:
+  zone:    { name: string, purpose: string, status: string }
+  airlock: { name: string, pressureLevel: number, locked: boolean }
+  door:    { name: string, airlockName?: string }
+
+Command map:
+  habitat zone create <name> --purpose <purpose> --status <status>
   habitat zone list
-  habitat airlock create main --pressure-level 2.5 --locked true
+  habitat zone show <name>
+  habitat zone update <name> [--purpose <purpose>] [--status <status>]
+  habitat zone delete <name>
+  habitat airlock create <name> --pressure-level <number> --locked <true|false>
   habitat airlock list
+  habitat airlock show <name>
+  habitat airlock update <name> [--pressure-level <number>] [--locked <true|false>]
+  habitat airlock add-door <airlockName> <doorName>
+  habitat airlock delete <name>
+  habitat door create <name>
+  habitat door list
+  habitat door show <name>
+  habitat door update <name> --name <newName>
+  habitat door delete <name>
+
+Common workflow:
+  habitat zone create kitchen --purpose cooking --status active
+  habitat airlock create main --pressure-level 2.5 --locked true
   habitat door create outer
   habitat airlock add-door main outer
+  habitat airlock show main
+  habitat door show outer
 
 Data:
   Stored in .habitat/data.json in the current working directory.
+  The file shape is { "zones": [], "airlocks": [], "doors": [] }.
 `,
   );
 
@@ -166,6 +195,16 @@ const zone = new Command("zone")
   .addHelpText(
     "after",
     `
+Schema:
+  { name: string, purpose: string, status: string }
+
+Commands:
+  habitat zone create <name> --purpose <purpose> --status <status>
+  habitat zone list
+  habitat zone show <name>
+  habitat zone update <name> [--purpose <purpose>] [--status <status>]
+  habitat zone delete <name>
+
 Examples:
   habitat zone create kitchen --purpose cooking --status active
   habitat zone list
@@ -174,7 +213,9 @@ Examples:
   habitat zone delete kitchen
 
 Notes:
+  name is the lookup key for show, update, and delete.
   update changes only the fields you provide.
+  zones are stored in the zones array in .habitat/data.json.
 `,
   );
 
@@ -277,6 +318,17 @@ const airlock = new Command("airlock")
   .addHelpText(
     "after",
     `
+Schema:
+  { name: string, pressureLevel: number, locked: boolean }
+
+Commands:
+  habitat airlock create <name> --pressure-level <number> --locked <true|false>
+  habitat airlock list
+  habitat airlock show <name>
+  habitat airlock update <name> [--pressure-level <number>] [--locked <true|false>]
+  habitat airlock add-door <airlockName> <doorName>
+  habitat airlock delete <name>
+
 Examples:
   habitat airlock create main --pressure-level 2.5 --locked true
   habitat airlock list
@@ -286,10 +338,14 @@ Examples:
   habitat airlock delete main
 
 Notes:
+  name is the lookup key for show, update, add-door, and delete.
   --pressure-level accepts a number.
   --locked accepts true or false.
-  add-door stores the airlock name on the door.
+  add-door requires both the airlock and door to already exist.
+  add-door stores the airlock name on the door as airlockName.
+  deleting an airlock clears airlockName from attached doors.
   update changes only the fields you provide.
+  airlocks are stored in the airlocks array in .habitat/data.json.
 `,
   );
 
@@ -460,6 +516,20 @@ const door = new Command("door")
   .addHelpText(
     "after",
     `
+Schema:
+  { name: string, airlockName?: string }
+
+Commands:
+  habitat door create <name>
+  habitat door list
+  habitat door show <name>
+  habitat door update <name> --name <newName>
+  habitat door delete <name>
+
+Relationship:
+  Attach a door with: habitat airlock add-door <airlockName> <doorName>
+  The relationship is saved on the door as airlockName.
+
 Examples:
   habitat door create outer
   habitat door list
@@ -469,7 +539,8 @@ Examples:
   habitat door delete inner
 
 Notes:
-  Doors store their airlock relationship as an airlockName field.
+  name is the lookup key for show, update, delete, and add-door.
+  doors are stored in the doors array in .habitat/data.json.
 `,
   );
 
