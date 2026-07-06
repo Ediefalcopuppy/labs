@@ -397,9 +397,11 @@ airlock
     }
 
     for (const airlock of data.airlocks) {
-      const doorCount = data.doors.filter((door) => door.airlockName === airlock.name).length;
+      const doors = data.doors
+        .filter((door) => door.airlockName === airlock.name)
+        .map((door) => door.name);
       console.log(
-        `${airlock.name} | pressure level: ${airlock.pressureLevel} | locked: ${airlock.locked} | doors: ${doorCount}`,
+        `${airlock.name} | pressure level: ${airlock.pressureLevel} | locked: ${airlock.locked} | doors: ${doors.length > 0 ? doors.join(", ") : "none"}`,
       );
     }
   });
