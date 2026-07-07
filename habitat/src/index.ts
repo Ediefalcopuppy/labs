@@ -172,14 +172,12 @@ function moduleStatus(module: HabitatModule): string {
   return typeof status === "string" ? status : "unknown";
 }
 
-function compactDisplayName(name: string): string {
-  const parts = name.trim().split(/\s+/).filter(Boolean);
-
-  if (parts.length <= 1) {
-    return name;
-  }
-
-  return [parts[0], ...parts.slice(1).map((part) => `${part.slice(0, 1)}.`)].join(" ");
+function slugDisplayName(name: string): string {
+  return name
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
 }
 
 async function findZone(name: string): Promise<{ data: HabitatData; zone: Zone }> {
@@ -963,7 +961,7 @@ moduleCommand
 
     for (const module of data.modules) {
       console.log(
-        `${compactDisplayName(module.displayName)} | blueprint: ${module.blueprintId} | status: ${moduleStatus(module)} | capabilities: ${module.capabilities.join(", ")}`,
+        `${slugDisplayName(module.displayName)} | blueprint: ${module.blueprintId} | status: ${moduleStatus(module)} | capabilities: ${module.capabilities.join(", ")}`,
       );
     }
   });
@@ -975,7 +973,7 @@ moduleCommand
   .action(async (name: string) => {
     const { module } = await findModule(name);
 
-    console.log(`Name: ${compactDisplayName(module.displayName)}`);
+    console.log(`Name: ${slugDisplayName(module.displayName)}`);
     console.log(`ID: ${module.id}`);
     console.log(`Blueprint: ${module.blueprintId}`);
     console.log(`Status: ${moduleStatus(module)}`);
