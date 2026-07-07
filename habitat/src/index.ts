@@ -21,7 +21,13 @@ type Door = {
   airlockName?: string;
 };
 
+type HabitatPowerTick = {
+  powerConsumedTicks: number;
+};
+
 type HabitatModule = StarterModuleInstance;
+
+type ModuleState = "online" | "offline" | "idle" | "active" | "damaged";
 
 type StarterModuleInstance = {
   id: string;
@@ -55,32 +61,13 @@ type ProductionBlueprint = {
   capabilities?: string[];
 };
 
-type KeplerHabitat = {
-  id: string;
-  habitatSlug: string;
-  displayName: string;
-  catalogVersion: string;
-  status: string;
-  lastSeenAt?: string | null;
-};
-
-type KeplerRegistration = {
-  habitatUuid: string;
-  displayName: string;
-  habitatId: string;
-  planetBaseUrl: string;
-  habitat?: KeplerHabitat;
-  registeredAt: string;
-  lastSyncedAt: string;
-};
-
 type HabitatData = {
   zones: Zone[];
   airlocks: Airlock[];
   doors: Door[];
   modules: HabitatModule[];
   blueprints: ProductionBlueprint[];
-  registration?: KeplerRegistration;
+  power: HabitatPowerTick;
 };
 
 const dataDir = join(process.cwd(), ".habitat");
@@ -93,6 +80,9 @@ function createEmptyData(): HabitatData {
     doors: [],
     modules: [],
     blueprints: [],
+    power: {
+      powerConsumedTicks: 0,
+    },
   };
 }
 
@@ -102,22 +92,12 @@ function normalizeData(data: unknown): HabitatData {
   }
 
   const candidate = data as Partial<HabitatData>;
-  const legacyRegistration = candidate.registration as
-    | (Partial<KeplerRegistration> & {
-        starterModules?: unknown;
-        blueprints?: unknown;
-      })
-    | undefined;
   const modules = Array.isArray(candidate.modules)
     ? (candidate.modules as HabitatModule[])
-    : Array.isArray(legacyRegistration?.starterModules)
-      ? (legacyRegistration.starterModules as HabitatModule[])
-      : [];
+    : [];
   const blueprints = Array.isArray(candidate.blueprints)
     ? candidate.blueprints
-    : Array.isArray(legacyRegistration?.blueprints)
-      ? (legacyRegistration.blueprints as ProductionBlueprint[])
-      : [];
+    : [];
 
   return {
     zones: Array.isArray(candidate.zones) ? candidate.zones : [],
@@ -125,10 +105,18 @@ function normalizeData(data: unknown): HabitatData {
     doors: Array.isArray(candidate.doors) ? candidate.doors : [],
     modules,
     blueprints,
-    registration:
-      candidate.registration && typeof candidate.registration === "object"
-        ? (candidate.registration as KeplerRegistration)
-        : undefined,
+    power:
+      candidate.power && typeof candidate.power === "object"
+        ? {
+            powerConsumedTicks:
+              typeof candidate.power.powerConsumedTicks === "number" &&
+              Number.isFinite(candidate.power.powerConsumedTicks)
+                ? candidate.power.powerConsumedTicks
+                : 0,
+          }
+        : {
+            powerConsumedTicks: 0,
+          },
   };
 }
 
@@ -168,8 +156,94 @@ function normalizeModule(module: HabitatModule): HabitatModule {
 }
 
 function moduleStatus(module: HabitatModule): string {
+  const state = module.runtimeAttributes.state;
+
+  if (typeof state === "string" && state.length > 0) {
+    return state;
+  }
+
   const status = module.runtimeAttributes.status;
   return typeof status === "string" ? status : "unknown";
+}
+
+function isModuleState(value: unknown): value is ModuleState {
+  return (
+    value === "online" ||
+    value === "offline" ||
+    value === "idle" ||
+    value === "active" ||
+    value === "damaged"
+  );
+}
+
+function moduleCurrentState(module: HabitatModule): ModuleState {
+  const candidate = module.runtimeAttributes.state ?? module.runtimeAttributes.status;
+  return isModuleState(candidate) ? candidate : "offline";
+}
+
+function moduleCurrentPowerDraw(module: HabitatModule): number {
+  const state = moduleCurrentState(module);
+  const byState = module.runtimeAttributes.powerDrawByState;
+
+  if (byState && typeof byState === "object") {
+    const candidate = (byState as Record<string, unknown>)[state];
+
+    if (typeof candidate === "number" && Number.isFinite(candidate)) {
+      return candidate;
+    }
+  }
+
+  const stateSpecificKey = `${state}PowerDraw`;
+  const stateSpecific = module.runtimeAttributes[stateSpecificKey];
+
+  if (typeof stateSpecific === "number" && Number.isFinite(stateSpecific)) {
+    return stateSpecific;
+  }
+
+  const draw = module.runtimeAttributes.powerDraw;
+
+  if (typeof draw === "number" && Number.isFinite(draw)) {
+    return draw;
+  }
+
+  return 0;
+}
+
+function sumModulePowerDraw(modules: HabitatModule[]): number {
+  return modules.reduce((total, module) => total + moduleCurrentPowerDraw(module), 0);
+}
+
+function renderModuleStatusTable(
+  rows: Array<{ name: string; state: ModuleState; powerDraw: number }>,
+): string {
+  const headers = ["Name", "State", "Power Draw"];
+  const widths = rows.reduce(
+    (accumulator, row) => {
+      accumulator[0] = Math.max(accumulator[0], row.name.length, headers[0].length);
+      accumulator[1] = Math.max(accumulator[1], row.state.length, headers[1].length);
+      accumulator[2] = Math.max(
+        accumulator[2],
+        String(row.powerDraw).length,
+        headers[2].length,
+      );
+      return accumulator;
+    },
+    [headers[0].length, headers[1].length, headers[2].length],
+  );
+
+  const separator = `${"-".repeat(widths[0])}-+-${"-".repeat(widths[1])}-+-${"-".repeat(widths[2])}`;
+  const lines = [
+    `${headers[0].padEnd(widths[0])} | ${headers[1].padEnd(widths[1])} | ${headers[2].padStart(widths[2])}`,
+    separator,
+  ];
+
+  for (const row of rows) {
+    lines.push(
+      `${row.name.padEnd(widths[0])} | ${row.state.padEnd(widths[1])} | ${String(row.powerDraw).padStart(widths[2])}`,
+    );
+  }
+
+  return lines.join("\n");
 }
 
 function slugDisplayName(name: string): string {
@@ -232,6 +306,20 @@ async function findModule(
   return { data, module };
 }
 
+async function findModuleById(
+  moduleId: string,
+): Promise<{ data: HabitatData; module: HabitatModule }> {
+  const data = await readData();
+  const module = data.modules.find((candidate) => candidate.id === moduleId);
+
+  if (!module) {
+    program.error(`No module with id '${moduleId}' exists.`);
+    throw new Error("Unreachable after Commander exits.");
+  }
+
+  return { data, module };
+}
+
 function findBlueprint(
   data: HabitatData,
   blueprintId: string,
@@ -261,86 +349,25 @@ function parseLocked(value: string): boolean {
   throw new InvalidArgumentError("locked must be true or false.");
 }
 
-function getPlanetBaseUrl(): string {
-  return (
-    process.env.KEPLER_PLANET_BASE_URL ??
-    process.env.KEPLER_WORLD_BASE_URL ??
-    process.env.PLANET_SERVER_PUBLIC_BASE_URL ??
-    "https://planet.turingguild.com"
-  ).replace(/\/+$/, "");
+function parseModuleState(value: string): ModuleState {
+  if (isModuleState(value)) {
+    return value;
+  }
+
+  throw new InvalidArgumentError(
+    "status must be one of offline, idle, online, active, or damaged.",
+  );
 }
 
-function getPlanetToken(): string {
-  const token =
-    process.env.KEPLER_PLANET_TOKEN ??
-    process.env.KEPLER_WORLD_TOKEN ??
-    process.env.PLANET_TOKEN;
+function parseTickCount(value: string): number {
+  const tickCount = Number(value);
 
-  if (!token) {
-    program.error(
-      "Missing Kepler bearer token. Set KEPLER_PLANET_TOKEN, KEPLER_WORLD_TOKEN, or PLANET_TOKEN.",
-    );
-    throw new Error("Unreachable after Commander exits.");
+  if (!Number.isInteger(tickCount) || tickCount <= 0) {
+    throw new InvalidArgumentError("tick count must be a positive whole number.");
   }
 
-  return token;
+  return tickCount;
 }
-
-async function requestKepler<T>(
-  path: string,
-  options: {
-    method: "GET" | "POST" | "DELETE";
-    body?: unknown;
-    baseUrl?: string;
-  },
-): Promise<T | undefined> {
-  const baseUrl = options.baseUrl ?? getPlanetBaseUrl();
-  const headers = new Headers({
-    Authorization: `Bearer ${getPlanetToken()}`,
-  });
-
-  if (options.body !== undefined) {
-    headers.set("Content-Type", "application/json");
-  }
-
-  let response: Response;
-
-  try {
-    response = await fetch(`${baseUrl}${path}`, {
-      method: options.method,
-      headers,
-      body: options.body === undefined ? undefined : JSON.stringify(options.body),
-    });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    program.error(`Could not reach Kepler at ${baseUrl}: ${message}`);
-    throw new Error("Unreachable after Commander exits.");
-  }
-
-  if (!response.ok) {
-    const errorText = await response.text();
-    program.error(
-      `Kepler request failed: ${options.method} ${path} returned ${response.status}${errorText ? `: ${errorText}` : ""}`,
-    );
-    throw new Error("Unreachable after Commander exits.");
-  }
-
-  if (response.status === 204) {
-    return undefined;
-  }
-
-  return (await response.json()) as T;
-}
-
-type HabitatRegistrationResponse = {
-  habitatId: string;
-  starterModules: StarterModuleInstance[];
-  blueprints: ProductionBlueprint[];
-};
-
-type HabitatResponse = {
-  habitat: KeplerHabitat;
-};
 
 const program = new Command();
 
@@ -362,11 +389,10 @@ Object schemas:
   airlock: { name: string, pressureLevel: number, locked: boolean }
   door:    { name: string, airlockName?: string }
   module:  { id: string, blueprintId: string, displayName: string, connectedTo: string[], runtimeAttributes: object, capabilities: string[] }
+  power:   { powerConsumedTicks: number }
 
 Command map:
-  habitat register --name <habitat name>
-  habitat status
-  habitat unregister
+  habitat tick <count>
   habitat zone create <name> --purpose <purpose> --status <status>
   habitat zone list
   habitat zone show <name>
@@ -379,7 +405,10 @@ Command map:
   habitat airlock add-door <airlockName> <doorName>
   habitat airlock delete <name>
   habitat module create <name> --blueprint-id <id>
+  habitat module -l
   habitat module list
+  habitat module status
+  habitat module set-status <module-id> <status>
   habitat module show <name>
   habitat module update <name> [--name <newName>] [--status <status>]
   habitat module delete <name>
@@ -390,9 +419,11 @@ Command map:
   habitat door delete <name>
 
 Common workflow:
-  habitat register --name "Artemis Ridge"
-  habitat status
+  habitat tick 1
   habitat module list
+  habitat module -l
+  habitat module status
+  habitat module set-status <module-id> <status>
   habitat module create greenhouse --blueprint-id greenhouse
   habitat zone create kitchen --purpose cooking --status active
   habitat airlock create main --pressure-level 2.5 --locked true
@@ -403,12 +434,7 @@ Common workflow:
 
 Data:
   Stored in .habitat/data.json in the current working directory.
-  The file shape is { "zones": [], "airlocks": [], "doors": [], "modules": [], "blueprints": [], "registration": {} }.
-  Kepler tokens are read from env and are never stored in this file.
-
-Kepler auth:
-  Set KEPLER_PLANET_TOKEN, KEPLER_WORLD_TOKEN, or PLANET_TOKEN.
-  Optional base URL env: KEPLER_PLANET_BASE_URL, KEPLER_WORLD_BASE_URL, or PLANET_SERVER_PUBLIC_BASE_URL.
+  The file shape is { "zones": [], "airlocks": [], "doors": [], "modules": [], "blueprints": [], "power": { "powerConsumedTicks": 0 } }.
 `,
   );
 
@@ -419,142 +445,45 @@ program.on("command:*", ([command]) => {
 });
 
 program
-  .command("register")
-  .description("Register this habitat with Kepler.")
-  .requiredOption("-n, --name <habitatName>", "habitat display name")
+  .command("tick")
+  .description("Advance the habitat simulation by a number of ticks.")
+  .argument("<count>", "number of ticks to advance", parseTickCount)
   .addHelpText(
     "after",
     `
-Sends exactly these OpenAPI request keys:
-  { "displayName": string, "habitatUuid": uuid }
+For now, tick only updates local power consumption counters.
+Each tick increments powerConsumedTicks on every stored module.
 
-Hydrates local module records from returned starterModules and caches the returned blueprints locally.
+Examples:
+  habitat tick 1
+  habitat tick 12
 `,
   )
-  .action(async (options: { name: string }) => {
+  .action(async (count: number) => {
     const data = await readData();
+    const totalPowerDraw = sumModulePowerDraw(data.modules);
 
-    if (data.registration) {
-      program.error(
-        `This directory is already registered as '${data.registration.displayName}' (${data.registration.habitatId}).`,
-      );
+    for (const module of data.modules) {
+      const currentPowerTicks = module.runtimeAttributes.powerConsumedTicks;
+      const modulePowerDraw = moduleCurrentPowerDraw(module);
+      const moduleTickCost = modulePowerDraw * count;
+      const nextPowerTicks =
+        typeof currentPowerTicks === "number" && Number.isFinite(currentPowerTicks)
+          ? currentPowerTicks + moduleTickCost
+          : moduleTickCost;
+
+      module.runtimeAttributes = {
+        ...module.runtimeAttributes,
+        powerConsumedTicks: nextPowerTicks,
+      };
     }
 
-    const planetBaseUrl = getPlanetBaseUrl();
-    const habitatUuid = randomUUID();
-    const now = new Date().toISOString();
-    const response = await requestKepler<HabitatRegistrationResponse>(
-      "/habitats/register",
-      {
-        method: "POST",
-        baseUrl: planetBaseUrl,
-        body: {
-          displayName: options.name,
-          habitatUuid,
-        },
-      },
-    );
-
-    if (!response) {
-      program.error("Kepler did not return registration data.");
-      throw new Error("Unreachable after Commander exits.");
-    }
-
-    data.modules = response.starterModules.map(normalizeModule);
-    data.blueprints = cloneJson(response.blueprints);
-    data.registration = {
-      habitatUuid,
-      displayName: options.name,
-      habitatId: response.habitatId,
-      planetBaseUrl,
-      registeredAt: now,
-      lastSyncedAt: now,
-    };
+    data.power.powerConsumedTicks += totalPowerDraw * count;
     await writeData(data);
 
-    console.log(`Registered habitat '${options.name}'.`);
-    console.log(`Habitat ID: ${response.habitatId}`);
-    console.log(`Starter modules: ${data.modules.length}`);
-    console.log(`Blueprints: ${data.blueprints.length}`);
-  });
-
-program
-  .command("status")
-  .description("Show Kepler registration status for this habitat.")
-  .addHelpText(
-    "after",
-    `
-Requires an existing local registration from habitat register.
-Fetches GET /habitats/{habitatId}/registration and updates local registration metadata.
-`,
-  )
-  .action(async () => {
-    const data = await readData();
-
-    if (!data.registration) {
-      console.log("Not registered with Kepler.");
-      return;
-    }
-
-    const response = await requestKepler<HabitatResponse>(
-      `/habitats/${encodeURIComponent(data.registration.habitatId)}/registration`,
-      {
-        method: "GET",
-        baseUrl: data.registration.planetBaseUrl,
-      },
-    );
-
-    if (!response) {
-      program.error("Kepler did not return habitat status data.");
-      throw new Error("Unreachable after Commander exits.");
-    }
-
-    data.registration.habitat = response.habitat;
-    data.registration.lastSyncedAt = new Date().toISOString();
-    await writeData(data);
-
-    console.log(`Registration: registered`);
-    console.log(`Display name: ${response.habitat.displayName}`);
-    console.log(`Habitat ID: ${response.habitat.id}`);
-    console.log(`Slug: ${response.habitat.habitatSlug}`);
-    console.log(`Status: ${response.habitat.status}`);
-    console.log(`Catalog version: ${response.habitat.catalogVersion}`);
-    console.log(`Last seen: ${response.habitat.lastSeenAt ?? "never"}`);
-    console.log(`Base URL: ${data.registration.planetBaseUrl}`);
-    console.log(`Modules: ${data.modules.length}`);
-  });
-
-program
-  .command("unregister")
-  .description("Delete this habitat registration from Kepler.")
-  .addHelpText(
-    "after",
-    `
-Sends DELETE /habitats/{habitatId}.
-On 204 success, clears only the local Kepler registration metadata.
-Local zones, airlocks, doors, modules, and blueprints remain in .habitat/data.json.
-`,
-  )
-  .action(async () => {
-    const data = await readData();
-
-    if (!data.registration) {
-      console.log("Not registered with Kepler.");
-      return;
-    }
-
-    const { habitatId, displayName, planetBaseUrl } = data.registration;
-
-    await requestKepler<void>(`/habitats/${encodeURIComponent(habitatId)}`, {
-      method: "DELETE",
-      baseUrl: planetBaseUrl,
-    });
-
-    delete data.registration;
-    await writeData(data);
-
-    console.log(`Unregistered habitat '${displayName}'.`);
-    console.log(`Habitat ID: ${habitatId}`);
+    console.log(`Advanced habitat by ${count} tick(s).`);
+    console.log(`Updated power consumption counters on ${data.modules.length} module(s).`);
+    console.log(`Energy cost for ${count} tick(s): ${totalPowerDraw * count}`);
   });
 
 const zone = new Command("zone")
@@ -891,28 +820,54 @@ Schema:
 
 Commands:
   habitat module create <name> --blueprint-id <id>
+  habitat module -l
   habitat module list
+  habitat module status
+  habitat module set-status <module-id> <status>
   habitat module show <name>
   habitat module update <name> [--name <newName>] [--status <status>]
   habitat module delete <name>
 
 Notes:
   name is the lookup key and displayName for local modules.
-  create is blueprint-driven and uses the cached Kepler blueprint catalog.
-  starter modules are hydrated automatically during habitat register.
+  create is blueprint-driven and uses the cached blueprint catalog.
+  -l lists the cached blueprint ids and display names.
   update changes the display name and/or runtime status.
+  status reads runtimeAttributes.state first, then runtimeAttributes.status.
+  power draw prefers runtimeAttributes.powerDrawByState, then state-specific power draw fields, then runtimeAttributes.powerDraw.
+  set-status changes only runtimeAttributes.status on the matching module id.
 `,
   );
 
+moduleCommand.option("-l, --list-blueprints", "list available blueprint ids and display names");
+
+moduleCommand.action(async (options: { listBlueprints?: boolean } = {}) => {
+  if (!options.listBlueprints) {
+    moduleCommand.help();
+    return;
+  }
+
+  const data = await readData();
+
+  if (data.blueprints.length === 0) {
+    console.log("No blueprints found.");
+    return;
+  }
+
+  for (const blueprint of data.blueprints) {
+    console.log(`${blueprint.blueprintId} | ${blueprint.displayName}`);
+  }
+});
+
 moduleCommand
   .command("create")
-  .description("Create a module from a cached Kepler blueprint.")
+  .description("Create a module from a cached blueprint.")
   .argument("<name>", "module display name")
   .requiredOption("-b, --blueprint-id <blueprintId>", "published blueprint id")
   .addHelpText(
     "after",
     `
-The blueprint must exist in the cached Kepler blueprint catalog and must output a module.
+The blueprint must exist in the cached blueprint catalog and must output a module.
 `,
   )
   .action(async (name: string, options: { blueprintId: string }) => {
@@ -967,6 +922,61 @@ moduleCommand
   });
 
 moduleCommand
+  .command("status")
+  .description("Show module states and power draw.")
+  .addHelpText(
+    "after",
+    `
+Shows a text table with the module name, current state, and current power draw.
+The summary line reports the total current power draw and the one-tick energy cost.
+
+Examples:
+  habitat module status
+`,
+  )
+  .action(async () => {
+    const data = await readData();
+
+    if (data.modules.length === 0) {
+      console.log("No modules found.");
+      console.log("Total current power draw: 0");
+      console.log("Energy cost for one tick: 0");
+      return;
+    }
+
+    const rows = data.modules.map((module) => ({
+      name: slugDisplayName(module.displayName),
+      state: moduleCurrentState(module),
+      powerDraw: moduleCurrentPowerDraw(module),
+    }));
+    const totalPowerDraw = rows.reduce((total, row) => total + row.powerDraw, 0);
+
+    console.log(renderModuleStatusTable(rows));
+    console.log(`Total current power draw: ${totalPowerDraw}`);
+    console.log(`Energy cost for one tick: ${totalPowerDraw}`);
+  });
+
+moduleCommand
+  .command("set-status")
+  .description("Set a module's runtime state.")
+  .argument("<module-id>", "module id")
+  .argument("<status>", "module status", parseModuleState)
+  .action(async (moduleId: string, status: ModuleState) => {
+    const { data, module } = await findModuleById(moduleId);
+
+    module.runtimeAttributes = {
+      ...module.runtimeAttributes,
+      status,
+    };
+
+    await writeData(data);
+
+    console.log(
+      `Updated module '${moduleId}' to status '${status}' (power draw: ${moduleCurrentPowerDraw(module)}).`,
+    );
+  });
+
+moduleCommand
   .command("show")
   .description("Show one module.")
   .argument("<name>", "module display name")
@@ -1006,6 +1016,7 @@ moduleCommand
     if (options.status) {
       module.runtimeAttributes = {
         ...module.runtimeAttributes,
+        state: options.status,
         status: options.status,
       };
     }
