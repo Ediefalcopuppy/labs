@@ -21,6 +21,8 @@ type Door = {
   airlockName?: string;
 };
 
+type HabitatModule = StarterModuleInstance;
+
 type StarterModuleInstance = {
   id: string;
   blueprintId: string;
@@ -67,8 +69,6 @@ type KeplerRegistration = {
   displayName: string;
   habitatId: string;
   planetBaseUrl: string;
-  starterModules: StarterModuleInstance[];
-  blueprints: ProductionBlueprint[];
   habitat?: KeplerHabitat;
   registeredAt: string;
   lastSyncedAt: string;
@@ -78,6 +78,8 @@ type HabitatData = {
   zones: Zone[];
   airlocks: Airlock[];
   doors: Door[];
+  modules: HabitatModule[];
+  blueprints: ProductionBlueprint[];
   registration?: KeplerRegistration;
 };
 
@@ -89,6 +91,8 @@ function createEmptyData(): HabitatData {
     zones: [],
     airlocks: [],
     doors: [],
+    modules: [],
+    blueprints: [],
   };
 }
 
@@ -98,11 +102,29 @@ function normalizeData(data: unknown): HabitatData {
   }
 
   const candidate = data as Partial<HabitatData>;
+  const legacyRegistration = candidate.registration as
+    | (Partial<KeplerRegistration> & {
+        starterModules?: unknown;
+        blueprints?: unknown;
+      })
+    | undefined;
+  const modules = Array.isArray(candidate.modules)
+    ? (candidate.modules as HabitatModule[])
+    : Array.isArray(legacyRegistration?.starterModules)
+      ? (legacyRegistration.starterModules as HabitatModule[])
+      : [];
+  const blueprints = Array.isArray(candidate.blueprints)
+    ? candidate.blueprints
+    : Array.isArray(legacyRegistration?.blueprints)
+      ? (legacyRegistration.blueprints as ProductionBlueprint[])
+      : [];
 
   return {
     zones: Array.isArray(candidate.zones) ? candidate.zones : [],
     airlocks: Array.isArray(candidate.airlocks) ? candidate.airlocks : [],
     doors: Array.isArray(candidate.doors) ? candidate.doors : [],
+    modules,
+    blueprints,
     registration:
       candidate.registration && typeof candidate.registration === "object"
         ? (candidate.registration as KeplerRegistration)
@@ -128,6 +150,36 @@ async function readData(): Promise<HabitatData> {
 async function writeData(data: HabitatData): Promise<void> {
   await mkdir(dataDir, { recursive: true });
   await writeFile(dataPath, `${JSON.stringify(data, null, 2)}\n`);
+}
+
+function cloneJson<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T;
+}
+
+function normalizeModule(module: HabitatModule): HabitatModule {
+  return {
+    id: module.id,
+    blueprintId: module.blueprintId,
+    displayName: module.displayName,
+    connectedTo: [...module.connectedTo],
+    runtimeAttributes: cloneJson(module.runtimeAttributes),
+    capabilities: [...module.capabilities],
+  };
+}
+
+function moduleStatus(module: HabitatModule): string {
+  const status = module.runtimeAttributes.status;
+  return typeof status === "string" ? status : "unknown";
+}
+
+function compactDisplayName(name: string): string {
+  const parts = name.trim().split(/\s+/).filter(Boolean);
+
+  if (parts.length <= 1) {
+    return name;
+  }
+
+  return [parts[0], ...parts.slice(1).map((part) => `${part.slice(0, 1)}.`)].join(" ");
 }
 
 async function findZone(name: string): Promise<{ data: HabitatData; zone: Zone }> {
@@ -166,6 +218,27 @@ async function findDoor(name: string): Promise<{ data: HabitatData; door: Door }
   }
 
   return { data, door };
+}
+
+async function findModule(
+  displayName: string,
+): Promise<{ data: HabitatData; module: HabitatModule }> {
+  const data = await readData();
+  const module = data.modules.find((candidate) => candidate.displayName === displayName);
+
+  if (!module) {
+    program.error(`No module named '${displayName}' exists.`);
+    throw new Error("Unreachable after Commander exits.");
+  }
+
+  return { data, module };
+}
+
+function findBlueprint(
+  data: HabitatData,
+  blueprintId: string,
+): ProductionBlueprint | undefined {
+  return data.blueprints.find((candidate) => candidate.blueprintId === blueprintId);
 }
 
 function parsePressureLevel(value: string): number {
@@ -290,6 +363,7 @@ Object schemas:
   zone:    { name: string, purpose: string, status: string }
   airlock: { name: string, pressureLevel: number, locked: boolean }
   door:    { name: string, airlockName?: string }
+  module:  { id: string, blueprintId: string, displayName: string, connectedTo: string[], runtimeAttributes: object, capabilities: string[] }
 
 Command map:
   habitat register --name <habitat name>
@@ -306,6 +380,11 @@ Command map:
   habitat airlock update <name> [--pressure-level <number>] [--locked <true|false>]
   habitat airlock add-door <airlockName> <doorName>
   habitat airlock delete <name>
+  habitat module create <name> --blueprint-id <id>
+  habitat module list
+  habitat module show <name>
+  habitat module update <name> [--name <newName>] [--status <status>]
+  habitat module delete <name>
   habitat door create <name>
   habitat door list
   habitat door show <name>
@@ -315,6 +394,8 @@ Command map:
 Common workflow:
   habitat register --name "Artemis Ridge"
   habitat status
+  habitat module list
+  habitat module create greenhouse --blueprint-id greenhouse
   habitat zone create kitchen --purpose cooking --status active
   habitat airlock create main --pressure-level 2.5 --locked true
   habitat door create outer
@@ -324,7 +405,7 @@ Common workflow:
 
 Data:
   Stored in .habitat/data.json in the current working directory.
-  The file shape is { "zones": [], "airlocks": [], "doors": [], "registration": {} }.
+  The file shape is { "zones": [], "airlocks": [], "doors": [], "modules": [], "blueprints": [], "registration": {} }.
   Kepler tokens are read from env and are never stored in this file.
 
 Kepler auth:
@@ -349,7 +430,7 @@ program
 Sends exactly these OpenAPI request keys:
   { "displayName": string, "habitatUuid": uuid }
 
-Stores returned habitatId, starterModules, and blueprints in .habitat/data.json.
+Hydrates local module records from returned starterModules and caches the returned blueprints locally.
 `,
   )
   .action(async (options: { name: string }) => {
@@ -381,13 +462,13 @@ Stores returned habitatId, starterModules, and blueprints in .habitat/data.json.
       throw new Error("Unreachable after Commander exits.");
     }
 
+    data.modules = response.starterModules.map(normalizeModule);
+    data.blueprints = cloneJson(response.blueprints);
     data.registration = {
       habitatUuid,
       displayName: options.name,
       habitatId: response.habitatId,
       planetBaseUrl,
-      starterModules: response.starterModules,
-      blueprints: response.blueprints,
       registeredAt: now,
       lastSyncedAt: now,
     };
@@ -395,8 +476,8 @@ Stores returned habitatId, starterModules, and blueprints in .habitat/data.json.
 
     console.log(`Registered habitat '${options.name}'.`);
     console.log(`Habitat ID: ${response.habitatId}`);
-    console.log(`Starter modules: ${response.starterModules.length}`);
-    console.log(`Blueprints: ${response.blueprints.length}`);
+    console.log(`Starter modules: ${data.modules.length}`);
+    console.log(`Blueprints: ${data.blueprints.length}`);
   });
 
 program
@@ -442,6 +523,7 @@ Fetches GET /habitats/{habitatId}/registration and updates local registration me
     console.log(`Catalog version: ${response.habitat.catalogVersion}`);
     console.log(`Last seen: ${response.habitat.lastSeenAt ?? "never"}`);
     console.log(`Base URL: ${data.registration.planetBaseUrl}`);
+    console.log(`Modules: ${data.modules.length}`);
   });
 
 program
@@ -452,7 +534,7 @@ program
     `
 Sends DELETE /habitats/{habitatId}.
 On 204 success, clears only the local Kepler registration metadata.
-Local zones, airlocks, and doors remain in .habitat/data.json.
+Local zones, airlocks, doors, modules, and blueprints remain in .habitat/data.json.
 `,
   )
   .action(async () => {
@@ -799,6 +881,167 @@ airlock.on("command:*", ([command]) => {
 });
 
 program.addCommand(airlock);
+
+const moduleCommand = new Command("module")
+  .description("Manage modules.")
+  .showHelpAfterError("Try 'habitat module --help' to see module commands.")
+  .addHelpText(
+    "after",
+    `
+Schema:
+  { id: string, blueprintId: string, displayName: string, connectedTo: string[], runtimeAttributes: object, capabilities: string[] }
+
+Commands:
+  habitat module create <name> --blueprint-id <id>
+  habitat module list
+  habitat module show <name>
+  habitat module update <name> [--name <newName>] [--status <status>]
+  habitat module delete <name>
+
+Notes:
+  name is the lookup key and displayName for local modules.
+  create is blueprint-driven and uses the cached Kepler blueprint catalog.
+  starter modules are hydrated automatically during habitat register.
+  update changes the display name and/or runtime status.
+`,
+  );
+
+moduleCommand
+  .command("create")
+  .description("Create a module from a cached Kepler blueprint.")
+  .argument("<name>", "module display name")
+  .requiredOption("-b, --blueprint-id <blueprintId>", "published blueprint id")
+  .addHelpText(
+    "after",
+    `
+The blueprint must exist in the cached Kepler blueprint catalog and must output a module.
+`,
+  )
+  .action(async (name: string, options: { blueprintId: string }) => {
+    const data = await readData();
+    const blueprint = findBlueprint(data, options.blueprintId);
+
+    if (!blueprint) {
+      program.error(`No blueprint with id '${options.blueprintId}' exists in the cached catalog.`);
+      throw new Error("Unreachable after Commander exits.");
+    }
+
+    if (blueprint.output?.itemType !== "module") {
+      program.error(`Blueprint '${options.blueprintId}' does not create a module.`);
+      throw new Error("Unreachable after Commander exits.");
+    }
+
+    if (data.modules.some((candidate) => candidate.displayName === name)) {
+      program.error(`A module named '${name}' already exists.`);
+    }
+
+    data.modules.push(
+      normalizeModule({
+        id: `module_${randomUUID()}`,
+        blueprintId: blueprint.blueprintId,
+        displayName: name,
+        connectedTo: [],
+        runtimeAttributes: cloneJson(blueprint.runtimeAttributes ?? {}),
+        capabilities: [...(blueprint.capabilities ?? [])],
+      }),
+    );
+    await writeData(data);
+
+    console.log(`Created module '${name}'.`);
+  });
+
+moduleCommand
+  .command("list")
+  .description("List modules.")
+  .action(async () => {
+    const data = await readData();
+
+    if (data.modules.length === 0) {
+      console.log("No modules found.");
+      return;
+    }
+
+    for (const module of data.modules) {
+      console.log(
+        `${compactDisplayName(module.displayName)} | blueprint: ${module.blueprintId} | status: ${moduleStatus(module)} | capabilities: ${module.capabilities.join(", ")}`,
+      );
+    }
+  });
+
+moduleCommand
+  .command("show")
+  .description("Show one module.")
+  .argument("<name>", "module display name")
+  .action(async (name: string) => {
+    const { module } = await findModule(name);
+
+    console.log(`Name: ${compactDisplayName(module.displayName)}`);
+    console.log(`ID: ${module.id}`);
+    console.log(`Blueprint: ${module.blueprintId}`);
+    console.log(`Status: ${moduleStatus(module)}`);
+    console.log(`Connected to: ${module.connectedTo.length > 0 ? module.connectedTo.join(", ") : "none"}`);
+    console.log(`Capabilities: ${module.capabilities.length > 0 ? module.capabilities.join(", ") : "none"}`);
+    console.log(`Runtime attributes: ${JSON.stringify(module.runtimeAttributes, null, 2)}`);
+  });
+
+moduleCommand
+  .command("update")
+  .description("Update a module.")
+  .argument("<name>", "module display name")
+  .option("-n, --name <newName>", "new module display name")
+  .option("-s, --status <status>", "new module status")
+  .action(async (name: string, options: { name?: string; status?: string }) => {
+    if (options.name === undefined && options.status === undefined) {
+      program.error("Provide --name, --status, or both.");
+    }
+
+    const { data, module } = await findModule(name);
+
+    if (options.name && data.modules.some((candidate) => candidate.displayName === options.name && candidate !== module)) {
+      program.error(`A module named '${options.name}' already exists.`);
+    }
+
+    if (options.name) {
+      module.displayName = options.name;
+    }
+
+    if (options.status) {
+      module.runtimeAttributes = {
+        ...module.runtimeAttributes,
+        status: options.status,
+      };
+    }
+
+    await writeData(data);
+
+    console.log(`Updated module '${name}'.`);
+  });
+
+moduleCommand
+  .command("delete")
+  .description("Delete a module.")
+  .argument("<name>", "module display name")
+  .action(async (name: string) => {
+    const data = await readData();
+    const nextModules = data.modules.filter((module) => module.displayName !== name);
+
+    if (nextModules.length === data.modules.length) {
+      program.error(`No module named '${name}' exists.`);
+    }
+
+    data.modules = nextModules;
+    await writeData(data);
+
+    console.log(`Deleted module '${name}'.`);
+  });
+
+moduleCommand.on("command:*", ([command]) => {
+  moduleCommand.error(`Habitat does not know the module command '${command}'.`, {
+    code: "commander.unknownCommand",
+  });
+});
+
+program.addCommand(moduleCommand);
 
 const door = new Command("door")
   .description("Manage doors.")
