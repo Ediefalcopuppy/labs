@@ -1,0 +1,1 @@
+Docs to reference are at [https://planet.turingguild.com](planet docs) and [https://docs.turingguild.com/openapi.json](openAPI docs).

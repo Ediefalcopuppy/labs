@@ -29,6 +29,12 @@ type HabitatModule = StarterModuleInstance;
 
 type ModuleState = "online" | "offline" | "idle" | "active" | "damaged";
 
+type HabitatRegistration = {
+  displayName: string;
+  registeredAt: string;
+  lastSyncedAt: string;
+};
+
 type StarterModuleInstance = {
   id: string;
   blueprintId: string;
@@ -68,6 +74,7 @@ type HabitatData = {
   modules: HabitatModule[];
   blueprints: ProductionBlueprint[];
   power: HabitatPowerTick;
+  registration?: HabitatRegistration;
 };
 
 const dataDir = join(process.cwd(), ".habitat");
@@ -117,6 +124,10 @@ function normalizeData(data: unknown): HabitatData {
         : {
             powerConsumedTicks: 0,
           },
+    registration:
+      candidate.registration && typeof candidate.registration === "object"
+        ? (candidate.registration as HabitatRegistration)
+        : undefined,
   };
 }
 
@@ -209,14 +220,52 @@ function moduleCurrentPowerDraw(module: HabitatModule): number {
   return 0;
 }
 
+function moduleChargeLossMultiplier(data: HabitatData, module: HabitatModule): number {
+  const fromModule = module.runtimeAttributes.chargeLossPerTickMult;
+  if (typeof fromModule === "number" && Number.isFinite(fromModule)) {
+    return Math.min(1, Math.max(0.01, fromModule));
+  }
+
+  const blueprint = findBlueprintForModule(data, module);
+  const fromBlueprint = blueprint?.runtimeAttributes?.chargeLossPerTickMult;
+  return parseChargeLossMultiplier(fromBlueprint);
+}
+
+function chargerChargeRate(data: HabitatData, module: HabitatModule): number {
+  const blueprint = findBlueprintForModule(data, module);
+
+  if (!blueprint || !blueprintHasFlag(blueprint, "isCharger")) {
+    return 0;
+  }
+
+  const baseRate = (() => {
+    const runtimeRate = module.runtimeAttributes.chargePerTick;
+    if (typeof runtimeRate === "number" && Number.isFinite(runtimeRate)) {
+      return runtimeRate;
+    }
+
+    const blueprintRate = blueprint.runtimeAttributes?.chargePerTick;
+    if (typeof blueprintRate === "number" && Number.isFinite(blueprintRate)) {
+      return blueprintRate;
+    }
+
+    return 1;
+  })();
+
+  const upgradeLevel =
+    typeof blueprint.level === "number" && Number.isFinite(blueprint.level) ? blueprint.level : 0;
+
+  return baseRate * Math.pow(1.5, upgradeLevel);
+}
+
 function sumModulePowerDraw(modules: HabitatModule[]): number {
   return modules.reduce((total, module) => total + moduleCurrentPowerDraw(module), 0);
 }
 
 function renderModuleStatusTable(
-  rows: Array<{ name: string; state: ModuleState; powerDraw: number }>,
+  rows: Array<{ name: string; state: ModuleState; powerDraw: number; charge: string }>,
 ): string {
-  const headers = ["Name", "State", "Power Draw"];
+  const headers = ["Name", "State", "Power Draw", "Charge"];
   const widths = rows.reduce(
     (accumulator, row) => {
       accumulator[0] = Math.max(accumulator[0], row.name.length, headers[0].length);
@@ -226,20 +275,21 @@ function renderModuleStatusTable(
         String(row.powerDraw).length,
         headers[2].length,
       );
+      accumulator[3] = Math.max(accumulator[3], row.charge.length, headers[3].length);
       return accumulator;
     },
-    [headers[0].length, headers[1].length, headers[2].length],
+    [headers[0].length, headers[1].length, headers[2].length, headers[3].length],
   );
 
-  const separator = `${"-".repeat(widths[0])}-+-${"-".repeat(widths[1])}-+-${"-".repeat(widths[2])}`;
+  const separator = `${"-".repeat(widths[0])}-+-${"-".repeat(widths[1])}-+-${"-".repeat(widths[2])}-+-${"-".repeat(widths[3])}`;
   const lines = [
-    `${headers[0].padEnd(widths[0])} | ${headers[1].padEnd(widths[1])} | ${headers[2].padStart(widths[2])}`,
+    `${headers[0].padEnd(widths[0])} | ${headers[1].padEnd(widths[1])} | ${headers[2].padStart(widths[2])} | ${headers[3].padStart(widths[3])}`,
     separator,
   ];
 
   for (const row of rows) {
     lines.push(
-      `${row.name.padEnd(widths[0])} | ${row.state.padEnd(widths[1])} | ${String(row.powerDraw).padStart(widths[2])}`,
+      `${row.name.padEnd(widths[0])} | ${row.state.padEnd(widths[1])} | ${String(row.powerDraw).padStart(widths[2])} | ${row.charge.padStart(widths[3])}`,
     );
   }
 
@@ -320,6 +370,62 @@ async function findModuleById(
   return { data, module };
 }
 
+function findBlueprintForModule(
+  data: HabitatData,
+  module: HabitatModule,
+): ProductionBlueprint | undefined {
+  return data.blueprints.find((candidate) => candidate.blueprintId === module.blueprintId);
+}
+
+function blueprintHasFlag(
+  blueprint: ProductionBlueprint | undefined,
+  flag: "isBattery" | "isCharger",
+): boolean {
+  if (!blueprint) {
+    return false;
+  }
+
+  if (blueprint.runtimeAttributes && blueprint.runtimeAttributes[flag] === true) {
+    return true;
+  }
+
+  return Array.isArray(blueprint.capabilities) && blueprint.capabilities.includes(flag);
+}
+
+function moduleIsBattery(data: HabitatData, module: HabitatModule): boolean {
+  return blueprintHasFlag(findBlueprintForModule(data, module), "isBattery");
+}
+
+function moduleIsCharger(data: HabitatData, module: HabitatModule): boolean {
+  return blueprintHasFlag(findBlueprintForModule(data, module), "isCharger");
+}
+
+function batteryCharge(module: HabitatModule, data: HabitatData): number {
+  if (!moduleIsBattery(data, module)) {
+    return Number.NaN;
+  }
+
+  const charge = module.runtimeAttributes.charge;
+  return typeof charge === "number" && Number.isFinite(charge) ? charge : 100;
+}
+
+function parseChargeLossMultiplier(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return 1;
+  }
+
+  return Math.min(1, Math.max(0.01, value));
+}
+
+function formatCharge(charge: number): string {
+  if (!Number.isFinite(charge)) {
+    return "-";
+  }
+
+  const rounded = Math.round(charge * 100) / 100;
+  return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(2);
+}
+
 function findBlueprint(
   data: HabitatData,
   blueprintId: string,
@@ -392,6 +498,9 @@ Object schemas:
   power:   { powerConsumedTicks: number }
 
 Command map:
+  habitat register --name <habitat name>
+  habitat unregister
+  habitat status
   habitat tick <count>
   habitat zone create <name> --purpose <purpose> --status <status>
   habitat zone list
@@ -412,6 +521,8 @@ Command map:
   habitat module show <name>
   habitat module update <name> [--name <newName>] [--status <status>]
   habitat module delete <name>
+  habitat blueprint list
+  habitat blueprint show <blueprint-id>
   habitat door create <name>
   habitat door list
   habitat door show <name>
@@ -419,12 +530,17 @@ Command map:
   habitat door delete <name>
 
 Common workflow:
+  habitat register --name "Artemis Ridge"
+  habitat unregister
+  habitat status
   habitat tick 1
   habitat module list
   habitat module -l
   habitat module status
   habitat module set-status <module-id> <status>
   habitat module create greenhouse --blueprint-id greenhouse
+  habitat blueprint list
+  habitat blueprint show greenhouse
   habitat zone create kitchen --purpose cooking --status active
   habitat airlock create main --pressure-level 2.5 --locked true
   habitat door create outer
@@ -434,7 +550,7 @@ Common workflow:
 
 Data:
   Stored in .habitat/data.json in the current working directory.
-  The file shape is { "zones": [], "airlocks": [], "doors": [], "modules": [], "blueprints": [], "power": { "powerConsumedTicks": 0 } }.
+  The file shape is { "zones": [], "airlocks": [], "doors": [], "modules": [], "blueprints": [], "power": { "powerConsumedTicks": 0 }, "registration": {} }.
 `,
   );
 
@@ -443,6 +559,93 @@ program.on("command:*", ([command]) => {
     code: "commander.unknownCommand",
   });
 });
+
+program
+  .command("register")
+  .description("Register this habitat locally.")
+  .requiredOption("-n, --name <habitatName>", "habitat display name")
+  .action(async (options: { name: string }) => {
+    const data = await readData();
+
+    if (data.registration) {
+      program.error(`This directory is already registered as '${data.registration.displayName}'.`);
+    }
+
+    const now = new Date().toISOString();
+    data.registration = {
+      displayName: options.name,
+      registeredAt: now,
+      lastSyncedAt: now,
+    };
+    await writeData(data);
+
+    console.log(`Registered habitat '${options.name}'.`);
+  });
+
+program
+  .command("unregister")
+  .description("Remove the local habitat registration.")
+  .action(async () => {
+    const data = await readData();
+
+    if (!data.registration) {
+      console.log("Not registered.");
+      return;
+    }
+
+    const displayName = data.registration.displayName;
+    delete data.registration;
+    await writeData(data);
+
+    console.log(`Unregistered habitat '${displayName}'.`);
+  });
+
+program
+  .command("status")
+  .description("Show the local habitat status.")
+  .addHelpText(
+    "after",
+    `
+Shows the registered habitat name, local object counts, stored power ticks, and a module power summary.
+
+Examples:
+  habitat status
+`,
+  )
+  .action(async () => {
+    const data = await readData();
+    const moduleStates = data.modules.reduce<Record<ModuleState | "unknown", number>>(
+      (counts, module) => {
+        const state = moduleCurrentState(module);
+        counts[state] = (counts[state] ?? 0) + 1;
+        return counts;
+      },
+      { online: 0, offline: 0, idle: 0, active: 0, damaged: 0, unknown: 0 },
+    );
+    const totalPowerDraw = sumModulePowerDraw(data.modules);
+
+    console.log(`Registered: ${data.registration ? "yes" : "no"}`);
+    if (data.registration) {
+      console.log(`Habitat name: ${data.registration.displayName}`);
+      console.log(`Registered at: ${data.registration.registeredAt}`);
+      console.log(`Last synced at: ${data.registration.lastSyncedAt}`);
+    }
+
+    console.log(`Zones: ${data.zones.length}`);
+    console.log(`Airlocks: ${data.airlocks.length}`);
+    console.log(`Doors: ${data.doors.length}`);
+    console.log(`Modules: ${data.modules.length}`);
+    console.log(`Blueprints: ${data.blueprints.length}`);
+    console.log(`Power consumed ticks: ${data.power.powerConsumedTicks}`);
+
+    if (data.modules.length > 0) {
+      console.log(
+        `Module states: online ${moduleStates.online}, offline ${moduleStates.offline}, idle ${moduleStates.idle}, active ${moduleStates.active}, damaged ${moduleStates.damaged}, unknown ${moduleStates.unknown}`,
+      );
+      console.log(`Total current module power draw: ${totalPowerDraw}`);
+      console.log(`Energy cost for one tick: ${totalPowerDraw}`);
+    }
+  });
 
 program
   .command("tick")
@@ -462,6 +665,20 @@ Examples:
   .action(async (count: number) => {
     const data = await readData();
     const totalPowerDraw = sumModulePowerDraw(data.modules);
+    const batteries = data.modules.filter((module) => moduleIsBattery(data, module));
+    const onlineConsumers = data.modules.filter(
+      (module) =>
+        moduleCurrentState(module) === "online" &&
+        !moduleIsBattery(data, module) &&
+        !moduleIsCharger(data, module),
+    );
+    const onlineChargers = data.modules.filter(
+      (module) => moduleCurrentState(module) === "online" && moduleIsCharger(data, module),
+    );
+    const totalDrain = onlineConsumers.length;
+    const totalCharge = onlineChargers.reduce((total, module) => total + chargerChargeRate(data, module), 0);
+    const drainPerBattery = batteries.length > 0 ? totalDrain / batteries.length : 0;
+    const chargePerBattery = batteries.length > 0 ? totalCharge / batteries.length : 0;
 
     for (const module of data.modules) {
       const currentPowerTicks = module.runtimeAttributes.powerConsumedTicks;
@@ -475,6 +692,23 @@ Examples:
       module.runtimeAttributes = {
         ...module.runtimeAttributes,
         powerConsumedTicks: nextPowerTicks,
+      };
+    }
+
+    for (const module of batteries) {
+      const currentCharge = batteryCharge(module, data);
+      const nextCharge = Math.max(
+        0,
+        Math.min(
+          100,
+          currentCharge +
+            (chargePerBattery - drainPerBattery * moduleChargeLossMultiplier(data, module)) * count,
+        ),
+      );
+
+      module.runtimeAttributes = {
+        ...module.runtimeAttributes,
+        charge: nextCharge,
       };
     }
 
@@ -835,6 +1069,7 @@ Notes:
   update changes the display name and/or runtime status.
   status reads runtimeAttributes.state first, then runtimeAttributes.status.
   power draw prefers runtimeAttributes.powerDrawByState, then state-specific power draw fields, then runtimeAttributes.powerDraw.
+  batteries also display charge, capped at 100.
   set-status changes only runtimeAttributes.status on the matching module id.
 `,
   );
@@ -894,7 +1129,10 @@ The blueprint must exist in the cached blueprint catalog and must output a modul
         blueprintId: blueprint.blueprintId,
         displayName: name,
         connectedTo: [],
-        runtimeAttributes: cloneJson(blueprint.runtimeAttributes ?? {}),
+        runtimeAttributes: {
+          ...cloneJson(blueprint.runtimeAttributes ?? {}),
+          ...(blueprintHasFlag(blueprint, "isBattery") ? { charge: 100 } : {}),
+        },
         capabilities: [...(blueprint.capabilities ?? [])],
       }),
     );
@@ -928,6 +1166,7 @@ moduleCommand
     "after",
     `
 Shows a text table with the module name, current state, and current power draw.
+Batteries add a charge column.
 The summary line reports the total current power draw and the one-tick energy cost.
 
 Examples:
@@ -948,6 +1187,7 @@ Examples:
       name: slugDisplayName(module.displayName),
       state: moduleCurrentState(module),
       powerDraw: moduleCurrentPowerDraw(module),
+      charge: moduleIsBattery(data, module) ? formatCharge(batteryCharge(module, data)) : "-",
     }));
     const totalPowerDraw = rows.reduce((total, row) => total + row.powerDraw, 0);
 
@@ -981,7 +1221,8 @@ moduleCommand
   .description("Show one module.")
   .argument("<name>", "module display name")
   .action(async (name: string) => {
-    const { module } = await findModule(name);
+    const { data, module } = await findModule(name);
+    const isBattery = moduleIsBattery(data, module);
 
     console.log(`Name: ${slugDisplayName(module.displayName)}`);
     console.log(`ID: ${module.id}`);
@@ -989,6 +1230,9 @@ moduleCommand
     console.log(`Status: ${moduleStatus(module)}`);
     console.log(`Connected to: ${module.connectedTo.length > 0 ? module.connectedTo.join(", ") : "none"}`);
     console.log(`Capabilities: ${module.capabilities.length > 0 ? module.capabilities.join(", ") : "none"}`);
+    if (isBattery) {
+      console.log(`Charge: ${formatCharge(batteryCharge(module, data))}/100`);
+    }
     console.log(`Runtime attributes: ${JSON.stringify(module.runtimeAttributes, null, 2)}`);
   });
 
@@ -1051,6 +1295,139 @@ moduleCommand.on("command:*", ([command]) => {
 });
 
 program.addCommand(moduleCommand);
+
+const blueprintCommand = new Command("blueprint")
+  .description("Inspect the cached blueprint catalog.")
+  .showHelpAfterError("Try 'habitat blueprint --help' to see blueprint commands.")
+  .addHelpText(
+    "after",
+    `
+Schema:
+  { blueprintId: string, displayName: string, description?: string, output?: object, inputs?: object, productionCost?: object, requiredFacility?: object, buildTicks?: number, prerequisites?: string[], unlocks?: string[], repeatable?: boolean, level?: number, target?: object, facilityLevel?: object, attachmentPoints?: object, attachmentRequirements?: object[], runtimeAttributes?: object, capabilities?: string[] }
+
+Commands:
+  habitat blueprint list
+  habitat blueprint show <blueprint-id>
+
+Examples:
+  habitat blueprint list
+  habitat blueprint show greenhouse
+
+Notes:
+  list reads the cached blueprint catalog from .habitat/data.json.
+  show prints the full local blueprint record.
+  blueprint ids are the lookup keys for module creation and catalog inspection.
+`,
+  );
+
+blueprintCommand
+  .command("list")
+  .description("List blueprints.")
+  .action(async () => {
+    const data = await readData();
+
+    if (data.blueprints.length === 0) {
+      console.log("No blueprints found.");
+      return;
+    }
+
+    for (const blueprint of data.blueprints) {
+      console.log(`${blueprint.blueprintId} | ${blueprint.displayName}`);
+    }
+  });
+
+blueprintCommand
+  .command("show")
+  .description("Show one blueprint.")
+  .argument("<blueprint-id>", "blueprint id")
+  .action(async (blueprintId: string) => {
+    const data = await readData();
+    const blueprint = findBlueprint(data, blueprintId);
+
+    if (!blueprint) {
+      program.error(`No blueprint with id '${blueprintId}' exists.`);
+      throw new Error("Unreachable after Commander exits.");
+    }
+
+    console.log(`Blueprint ID: ${blueprint.blueprintId}`);
+    console.log(`Display name: ${blueprint.displayName}`);
+
+    if (blueprint.description) {
+      console.log(`Description: ${blueprint.description}`);
+    }
+
+    if (blueprint.status) {
+      console.log(`Status: ${blueprint.status}`);
+    }
+
+    if (blueprint.output) {
+      console.log(`Output: ${JSON.stringify(blueprint.output, null, 2)}`);
+    }
+
+    if (blueprint.inputs) {
+      console.log(`Inputs: ${JSON.stringify(blueprint.inputs, null, 2)}`);
+    }
+
+    if (blueprint.productionCost) {
+      console.log(`Production cost: ${JSON.stringify(blueprint.productionCost, null, 2)}`);
+    }
+
+    if (blueprint.requiredFacility) {
+      console.log(`Required facility: ${JSON.stringify(blueprint.requiredFacility, null, 2)}`);
+    }
+
+    if (typeof blueprint.buildTicks === "number") {
+      console.log(`Build ticks: ${blueprint.buildTicks}`);
+    }
+
+    if (blueprint.prerequisites && blueprint.prerequisites.length > 0) {
+      console.log(`Prerequisites: ${blueprint.prerequisites.join(", ")}`);
+    }
+
+    if (blueprint.unlocks && blueprint.unlocks.length > 0) {
+      console.log(`Unlocks: ${blueprint.unlocks.join(", ")}`);
+    }
+
+    if (typeof blueprint.repeatable === "boolean") {
+      console.log(`Repeatable: ${blueprint.repeatable}`);
+    }
+
+    if (typeof blueprint.level === "number") {
+      console.log(`Level: ${blueprint.level}`);
+    }
+
+    if (blueprint.target) {
+      console.log(`Target: ${JSON.stringify(blueprint.target, null, 2)}`);
+    }
+
+    if (blueprint.facilityLevel) {
+      console.log(`Facility level: ${JSON.stringify(blueprint.facilityLevel, null, 2)}`);
+    }
+
+    if (blueprint.attachmentPoints) {
+      console.log(`Attachment points: ${JSON.stringify(blueprint.attachmentPoints, null, 2)}`);
+    }
+
+    if (blueprint.attachmentRequirements && blueprint.attachmentRequirements.length > 0) {
+      console.log(`Attachment requirements: ${JSON.stringify(blueprint.attachmentRequirements, null, 2)}`);
+    }
+
+    if (blueprint.runtimeAttributes) {
+      console.log(`Runtime attributes: ${JSON.stringify(blueprint.runtimeAttributes, null, 2)}`);
+    }
+
+    if (blueprint.capabilities && blueprint.capabilities.length > 0) {
+      console.log(`Capabilities: ${blueprint.capabilities.join(", ")}`);
+    }
+  });
+
+blueprintCommand.on("command:*", ([command]) => {
+  blueprintCommand.error(`Habitat does not know the blueprint command '${command}'.`, {
+    code: "commander.unknownCommand",
+  });
+});
+
+program.addCommand(blueprintCommand);
 
 const door = new Command("door")
   .description("Manage doors.")
