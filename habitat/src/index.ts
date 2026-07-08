@@ -3,6 +3,12 @@ import { Command, InvalidArgumentError } from "commander";
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import {
+  fetchKeplerBlueprintCatalog,
+  fetchKeplerResourceCatalog,
+  type KeplerBlueprintCatalogEntry,
+  type KeplerResourceCatalogEntry,
+} from "./kepler-client";
 
 type Zone = {
   name: string;
@@ -44,28 +50,9 @@ type StarterModuleInstance = {
   capabilities: string[];
 };
 
-type ProductionBlueprint = {
-  id?: string;
-  blueprintId: string;
-  displayName: string;
-  description?: string;
-  status?: string;
-  output?: Record<string, unknown>;
-  inputs?: Record<string, unknown>;
-  productionCost?: Record<string, unknown>;
-  requiredFacility?: Record<string, unknown>;
-  buildTicks?: number;
-  prerequisites?: string[];
-  unlocks?: string[];
-  repeatable?: boolean;
-  level?: number | null;
-  target?: Record<string, unknown>;
-  facilityLevel?: Record<string, unknown>;
-  attachmentPoints?: Record<string, unknown>;
-  attachmentRequirements?: Record<string, unknown>[];
-  runtimeAttributes?: Record<string, unknown>;
-  capabilities?: string[];
-};
+type ProductionBlueprint = KeplerBlueprintCatalogEntry;
+
+type ResourceCatalogEntry = KeplerResourceCatalogEntry;
 
 type HabitatData = {
   zones: Zone[];
@@ -523,6 +510,7 @@ Command map:
   habitat module delete <name>
   habitat blueprint list
   habitat blueprint show <blueprint-id>
+  habitat resource list
   habitat door create <name>
   habitat door list
   habitat door show <name>
@@ -541,6 +529,7 @@ Common workflow:
   habitat module create greenhouse --blueprint-id greenhouse
   habitat blueprint list
   habitat blueprint show greenhouse
+  habitat resource list
   habitat zone create kitchen --purpose cooking --status active
   habitat airlock create main --pressure-level 2.5 --locked true
   habitat door create outer
@@ -1314,7 +1303,7 @@ Examples:
   habitat blueprint show greenhouse
 
 Notes:
-  list reads the cached blueprint catalog from .habitat/data.json.
+  list fetches the live blueprint catalog from Kepler and refreshes the local cache.
   show prints the full local blueprint record.
   blueprint ids are the lookup keys for module creation and catalog inspection.
 `,
@@ -1322,17 +1311,26 @@ Notes:
 
 blueprintCommand
   .command("list")
-  .description("List blueprints.")
+  .description("List blueprints from Kepler.")
   .action(async () => {
-    const data = await readData();
+    try {
+      const data = await readData();
+      const blueprints = await fetchKeplerBlueprintCatalog();
 
-    if (data.blueprints.length === 0) {
-      console.log("No blueprints found.");
-      return;
-    }
+      data.blueprints = blueprints;
+      await writeData(data);
 
-    for (const blueprint of data.blueprints) {
-      console.log(`${blueprint.blueprintId} | ${blueprint.displayName}`);
+      if (blueprints.length === 0) {
+        console.log("No blueprints found.");
+        return;
+      }
+
+      for (const blueprint of blueprints) {
+        console.log(`${blueprint.blueprintId} | ${blueprint.displayName}`);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unknown error.";
+      program.error(message);
     }
   });
 
@@ -1428,6 +1426,59 @@ blueprintCommand.on("command:*", ([command]) => {
 });
 
 program.addCommand(blueprintCommand);
+
+const resourceCommand = new Command("resource")
+  .description("Inspect the live resource catalog from Kepler.")
+  .showHelpAfterError("Try 'habitat resource --help' to see resource commands.")
+  .addHelpText(
+    "after",
+    `
+Schema:
+  { resourceId?: string, displayName?: string, name?: string, description?: string, status?: string, capabilities?: string[], runtimeAttributes?: object }
+
+Commands:
+  habitat resource list
+
+Examples:
+  habitat resource list
+
+Notes:
+  list fetches the live resource catalog from Kepler.
+  the catalog is not cached locally.
+  output shows the resource id and display name.
+`,
+  );
+
+resourceCommand
+  .command("list")
+  .description("List resources from Kepler.")
+  .action(async () => {
+    try {
+      const resources: ResourceCatalogEntry[] = await fetchKeplerResourceCatalog();
+
+      if (resources.length === 0) {
+        console.log("No resources found.");
+        return;
+      }
+
+      for (const resource of resources) {
+        const resourceId = resource.resourceId ?? resource.id ?? resource.name ?? "unknown";
+        const displayName = resource.displayName ?? resource.name ?? resourceId;
+        console.log(`${resourceId} | ${displayName}`);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unknown error.";
+      program.error(message);
+    }
+  });
+
+resourceCommand.on("command:*", ([command]) => {
+  resourceCommand.error(`Habitat does not know the resource command '${command}'.`, {
+    code: "commander.unknownCommand",
+  });
+});
+
+program.addCommand(resourceCommand);
 
 const door = new Command("door")
   .description("Manage doors.")
