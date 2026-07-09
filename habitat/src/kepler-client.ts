@@ -1,5 +1,18 @@
 const keplerBaseUrl = "https://planet.turingguild.com";
 
+export type KeplerHabitat = {
+  id: string;
+  habitatSlug: string;
+  displayName: string;
+  catalogVersion: string;
+  status: string;
+  lastSeenAt?: string | null;
+};
+
+type KeplerHabitatResponse = {
+  habitat?: Partial<KeplerHabitat>;
+};
+
 export type KeplerBlueprintCatalogEntry = {
   id?: string;
   blueprintId: string;
@@ -49,6 +62,50 @@ type KeplerResourceCatalogResponse =
       items?: unknown;
       data?: unknown;
     };
+
+function readKeplerToken(commandHint: string): string {
+  const token = process.env.KEPLER_PLANET_TOKEN;
+
+  if (!token) {
+    throw new Error(`Set KEPLER_PLANET_TOKEN before running '${commandHint}'.`);
+  }
+
+  return token;
+}
+
+function normalizeKeplerHabitat(value: Partial<KeplerHabitat>): KeplerHabitat {
+  if (typeof value.id !== "string" || value.id.length === 0) {
+    throw new Error("Kepler returned a habitat without a valid id.");
+  }
+
+  if (typeof value.habitatSlug !== "string" || value.habitatSlug.length === 0) {
+    throw new Error("Kepler returned a habitat without a valid habitatSlug.");
+  }
+
+  if (typeof value.displayName !== "string" || value.displayName.length === 0) {
+    throw new Error("Kepler returned a habitat without a valid displayName.");
+  }
+
+  if (typeof value.catalogVersion !== "string" || value.catalogVersion.length === 0) {
+    throw new Error("Kepler returned a habitat without a valid catalogVersion.");
+  }
+
+  if (typeof value.status !== "string" || value.status.length === 0) {
+    throw new Error("Kepler returned a habitat without a valid status.");
+  }
+
+  return {
+    id: value.id,
+    habitatSlug: value.habitatSlug,
+    displayName: value.displayName,
+    catalogVersion: value.catalogVersion,
+    status: value.status,
+    lastSeenAt:
+      typeof value.lastSeenAt === "string" || value.lastSeenAt === null
+        ? value.lastSeenAt
+        : undefined,
+  };
+}
 
 function normalizeBlueprintCatalogEntry(
   value: Partial<KeplerBlueprintCatalogEntry> & { id?: string },
@@ -163,13 +220,7 @@ function extractResourceEntries(payload: unknown): KeplerResourceCatalogEntry[] 
 }
 
 export async function fetchKeplerBlueprintCatalog(): Promise<KeplerBlueprintCatalogEntry[]> {
-  const token = process.env.KEPLER_PLANET_TOKEN;
-
-  if (!token) {
-    throw new Error(
-      "Set KEPLER_PLANET_TOKEN before running 'habitat blueprint list'.",
-    );
-  }
+  const token = readKeplerToken("habitat blueprint list");
 
   const response = await fetch(`${keplerBaseUrl}/catalog/blueprints`, {
     headers: {
@@ -188,11 +239,7 @@ export async function fetchKeplerBlueprintCatalog(): Promise<KeplerBlueprintCata
 }
 
 export async function fetchKeplerResourceCatalog(): Promise<KeplerResourceCatalogEntry[]> {
-  const token = process.env.KEPLER_PLANET_TOKEN;
-
-  if (!token) {
-    throw new Error("Set KEPLER_PLANET_TOKEN before running 'habitat resource list'.");
-  }
+  const token = readKeplerToken("habitat resource list");
 
   const response = await fetch(`${keplerBaseUrl}/catalog/resources`, {
     headers: {
@@ -208,4 +255,32 @@ export async function fetchKeplerResourceCatalog(): Promise<KeplerResourceCatalo
 
   const payload = (await response.json()) as KeplerResourceCatalogResponse;
   return extractResourceEntries(payload);
+}
+
+export async function fetchKeplerHabitatRegistration(
+  habitatId: string,
+): Promise<KeplerHabitat> {
+  const token = readKeplerToken("habitat link --id <habitatId>");
+  const response = await fetch(
+    `${keplerBaseUrl}/habitats/${encodeURIComponent(habitatId)}/registration`,
+    {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    },
+  );
+
+  if (!response.ok) {
+    throw new Error(
+      `Failed to fetch Kepler habitat '${habitatId}': ${response.status} ${response.statusText}.`,
+    );
+  }
+
+  const payload = (await response.json()) as KeplerHabitatResponse;
+
+  if (!payload.habitat || typeof payload.habitat !== "object") {
+    throw new Error("Kepler habitat registration response did not include a habitat object.");
+  }
+
+  return normalizeKeplerHabitat(payload.habitat);
 }

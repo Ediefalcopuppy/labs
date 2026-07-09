@@ -5,10 +5,22 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
   fetchKeplerBlueprintCatalog,
+  fetchKeplerHabitatRegistration,
   fetchKeplerResourceCatalog,
   type KeplerBlueprintCatalogEntry,
+  type KeplerHabitat,
   type KeplerResourceCatalogEntry,
 } from "./kepler-client";
+import {
+  BATTERY_MAX_CHARGE,
+  batteryConstructionDrainPerTick,
+  createUniqueModuleName,
+  computeBatteryChargeAfterTick,
+  forceConstructionStart,
+  planConstructionStart,
+  previewConstructionStart,
+  spendConstructionPower,
+} from "./construction";
 
 type Zone = {
   name: string;
@@ -41,10 +53,16 @@ type HabitatRegistration = {
   displayName: string;
   registeredAt: string;
   lastSyncedAt: string;
+  habitatId?: string;
+  habitatSlug?: string;
+  catalogVersion?: string;
+  remoteStatus?: string;
+  lastSeenAt?: string | null;
 };
 
 type StarterModuleInstance = {
   id: string;
+  name: string;
   blueprintId: string;
   displayName: string;
   connectedTo: string[];
@@ -149,7 +167,7 @@ function normalizeData(data: unknown): HabitatData {
           },
     registration:
       candidate.registration && typeof candidate.registration === "object"
-        ? (candidate.registration as HabitatRegistration)
+        ? normalizeRegistration(candidate.registration as Partial<HabitatRegistration>)
         : undefined,
   };
 }
@@ -178,9 +196,67 @@ function cloneJson<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
 }
 
+function normalizeRegistration(
+  registration: Partial<HabitatRegistration>,
+): HabitatRegistration {
+  return {
+    displayName:
+      typeof registration.displayName === "string" && registration.displayName.length > 0
+        ? registration.displayName
+        : "Unnamed Habitat",
+    registeredAt:
+      typeof registration.registeredAt === "string" && registration.registeredAt.length > 0
+        ? registration.registeredAt
+        : new Date(0).toISOString(),
+    lastSyncedAt:
+      typeof registration.lastSyncedAt === "string" && registration.lastSyncedAt.length > 0
+        ? registration.lastSyncedAt
+        : typeof registration.registeredAt === "string" && registration.registeredAt.length > 0
+          ? registration.registeredAt
+          : new Date(0).toISOString(),
+    habitatId:
+      typeof registration.habitatId === "string" && registration.habitatId.length > 0
+        ? registration.habitatId
+        : undefined,
+    habitatSlug:
+      typeof registration.habitatSlug === "string" && registration.habitatSlug.length > 0
+        ? registration.habitatSlug
+        : undefined,
+    catalogVersion:
+      typeof registration.catalogVersion === "string" && registration.catalogVersion.length > 0
+        ? registration.catalogVersion
+        : undefined,
+    remoteStatus:
+      typeof registration.remoteStatus === "string" && registration.remoteStatus.length > 0
+        ? registration.remoteStatus
+        : undefined,
+    lastSeenAt:
+      typeof registration.lastSeenAt === "string" || registration.lastSeenAt === null
+        ? registration.lastSeenAt
+        : undefined,
+  };
+}
+
+function linkedRegistrationFromHabitat(
+  habitat: KeplerHabitat,
+  linkedAt: string,
+): HabitatRegistration {
+  return {
+    displayName: habitat.displayName,
+    registeredAt: linkedAt,
+    lastSyncedAt: linkedAt,
+    habitatId: habitat.id,
+    habitatSlug: habitat.habitatSlug,
+    catalogVersion: habitat.catalogVersion,
+    remoteStatus: habitat.status,
+    lastSeenAt: habitat.lastSeenAt ?? null,
+  };
+}
+
 function normalizeModule(module: HabitatModule): HabitatModule {
   return {
     id: module.id,
+    name: module.name ?? module.id,
     blueprintId: module.blueprintId,
     displayName: module.displayName,
     connectedTo: [...module.connectedTo],
@@ -344,6 +420,7 @@ function hasUsableConstructionPower(data: HabitatData): boolean {
 function createModuleFromConstructionJob(job: ConstructionJob): HabitatModule {
   return normalizeModule({
     id: `module_${randomUUID()}`,
+    name: `module_${randomUUID()}`,
     blueprintId: job.blueprintId,
     displayName: job.moduleName,
     connectedTo: [],
@@ -421,13 +498,17 @@ function moduleHasFlag(
   return module.capabilities.includes(flag);
 }
 
-function moduleChargeLossMultiplier(module: HabitatModule): number {
-  const fromModule = module.runtimeAttributes.chargeLossPerTickMult;
-  if (typeof fromModule === "number" && Number.isFinite(fromModule)) {
-    return Math.min(1, Math.max(0.01, fromModule));
-  }
+function moduleIsLegacyBattery(module: HabitatModule): boolean {
+  const outputType = blueprintOutputTypeFromModule(module);
+  const runtimeEnergyStorage = module.runtimeAttributes.energyStorageKwh;
 
-  return 1;
+  return (
+    module.blueprintId === "battery-bank" ||
+    outputType === "battery-bank" ||
+    module.blueprintId.toLowerCase().includes("battery") ||
+    (typeof outputType === "string" && outputType.toLowerCase().includes("battery")) ||
+    (typeof runtimeEnergyStorage === "number" && Number.isFinite(runtimeEnergyStorage) && runtimeEnergyStorage > 0)
+  );
 }
 
 function chargerChargeRate(module: HabitatModule): number {
@@ -538,13 +619,15 @@ async function findDoor(name: string): Promise<{ data: HabitatData; door: Door }
 }
 
 async function findModule(
-  displayName: string,
+  name: string,
 ): Promise<{ data: HabitatData; module: HabitatModule }> {
   const data = await readData();
-  const module = data.modules.find((candidate) => candidate.displayName === displayName);
+  const module = data.modules.find(
+    (candidate) => candidate.name === name || candidate.id === name || candidate.displayName === name,
+  );
 
   if (!module) {
-    program.error(`No module named '${displayName}' exists.`);
+    program.error(`No module named '${name}' exists.`);
     throw new Error("Unreachable after Commander exits.");
   }
 
@@ -581,7 +664,7 @@ function blueprintHasFlag(
 }
 
 function moduleIsBattery(module: HabitatModule): boolean {
-  return moduleHasFlag(module, "isBattery");
+  return moduleHasFlag(module, "isBattery") || moduleIsLegacyBattery(module);
 }
 
 function moduleIsCharger(module: HabitatModule): boolean {
@@ -594,7 +677,18 @@ function batteryCharge(module: HabitatModule): number {
   }
 
   const charge = module.runtimeAttributes.charge;
-  return typeof charge === "number" && Number.isFinite(charge) ? charge : 100;
+  return typeof charge === "number" && Number.isFinite(charge) ? charge : BATTERY_MAX_CHARGE;
+}
+
+function setBatteryCharge(module: HabitatModule, charge: number): void {
+  if (!moduleIsBattery(module)) {
+    return;
+  }
+
+  module.runtimeAttributes = {
+    ...module.runtimeAttributes,
+    charge: Math.max(0, Math.min(BATTERY_MAX_CHARGE, charge)),
+  };
 }
 
 function parseChargeLossMultiplier(value: unknown): number {
@@ -699,8 +793,10 @@ Object schemas:
 
 Command map:
   habitat register --name <habitat name>
+  habitat link --id <habitatId>
   habitat unregister
   habitat status
+  habitat construct <blueprint-id>
   habitat tick <count>
   habitat zone create <name> --purpose <purpose> --status <status>
   habitat zone list
@@ -728,6 +824,7 @@ Command map:
   habitat inventory set <resource-id> <amount>
   habitat construction list
   habitat construction cancel <job-id>
+  habitat debug construct <blueprint-id>
   habitat door create <name>
   habitat door list
   habitat door show <name>
@@ -736,9 +833,12 @@ Command map:
 
 Common workflow:
   habitat register --name "Artemis Ridge"
+  habitat link --id hab_123456
   habitat unregister
   habitat status
+  habitat construct greenhouse
   habitat tick 1
+  habitat debug construct greenhouse
   habitat module list
   habitat module -l
   habitat module status
@@ -791,6 +891,35 @@ program
   });
 
 program
+  .command("link")
+  .description("Link this directory to an existing Kepler habitat.")
+  .requiredOption("-i, --id <habitatId>", "existing Kepler habitat id")
+  .addHelpText(
+    "after",
+    `
+Looks up an already-registered habitat from Kepler and stores its identity in .habitat/data.json.
+This links local state to an existing habitat id; it does not create a new habitat and it does not hydrate starter modules.
+
+Examples:
+  habitat link --id hab_123456
+`,
+  )
+  .action(async (options: { id: string }) => {
+    const data = await readData();
+
+    if (data.registration) {
+      program.error(`This directory is already registered as '${data.registration.displayName}'.`);
+    }
+
+    const habitat = await fetchKeplerHabitatRegistration(options.id);
+    const now = new Date().toISOString();
+    data.registration = linkedRegistrationFromHabitat(habitat, now);
+    await writeData(data);
+
+    console.log(`Linked habitat '${habitat.displayName}' (${habitat.id}).`);
+  });
+
+program
   .command("unregister")
   .description("Remove the local habitat registration.")
   .action(async () => {
@@ -835,6 +964,21 @@ Examples:
     console.log(`Registered: ${data.registration ? "yes" : "no"}`);
     if (data.registration) {
       console.log(`Habitat name: ${data.registration.displayName}`);
+      if (data.registration.habitatId) {
+        console.log(`Habitat id: ${data.registration.habitatId}`);
+      }
+      if (data.registration.habitatSlug) {
+        console.log(`Habitat slug: ${data.registration.habitatSlug}`);
+      }
+      if (data.registration.remoteStatus) {
+        console.log(`Remote status: ${data.registration.remoteStatus}`);
+      }
+      if (data.registration.catalogVersion) {
+        console.log(`Catalog version: ${data.registration.catalogVersion}`);
+      }
+      if (data.registration.lastSeenAt) {
+        console.log(`Last seen at: ${data.registration.lastSeenAt}`);
+      }
       console.log(`Registered at: ${data.registration.registeredAt}`);
       console.log(`Last synced at: ${data.registration.lastSyncedAt}`);
     }
@@ -855,6 +999,87 @@ Examples:
       console.log(`Total current module power draw: ${totalPowerDraw}`);
       console.log(`Energy cost for one tick: ${totalPowerDraw}`);
     }
+  });
+
+program
+  .command("construct")
+  .description("Start construction from a live Kepler blueprint.")
+  .argument("<blueprint-id>", "published blueprint id")
+  .option("-d, --display-name <displayName>", "visible module display name")
+  .option("--dry-run", "check whether construction can start without changing local files")
+  .addHelpText(
+    "after",
+    `
+The blueprint is fetched from Kepler at command time, so the server remains the source of truth for build properties.
+Construction state is stored locally in .habitat/data.json.
+
+Examples:
+  habitat construct greenhouse
+`,
+  )
+  .action(async (blueprintId: string, options: { dryRun?: boolean; displayName?: string }) => {
+    const data = await readData();
+
+    const blueprints = await fetchKeplerBlueprintCatalog();
+    const blueprint = blueprints.find(
+      (candidate) => candidate.blueprintId === blueprintId || candidate.id === blueprintId,
+    );
+
+    if (!blueprint) {
+      program.error(`No blueprint with id '${blueprintId}' exists in Kepler.`);
+      throw new Error("Unreachable after Commander exits.");
+    }
+
+    const report = previewConstructionStart({
+      blueprint,
+      habitat: data,
+      displayName: options.displayName ?? blueprint.displayName,
+    });
+
+    if (options.dryRun) {
+      console.log(`Required facility exists: ${report.requiredFacilityExists ? "yes" : "no"}`);
+      console.log(`Fabricator available: ${report.fabricatorAvailable ? "yes" : "no"}`);
+      console.log(`Supply cache online: ${report.supplyCacheOnline ? "yes" : "no"}`);
+      console.log(`Prerequisites met: ${report.prerequisitesMet ? "yes" : "no"}`);
+      console.log(`Inventory has required resources: ${report.inventoryHasMaterials ? "yes" : "no"}`);
+      console.log(`Module to be created: ${report.moduleToBeCreated}`);
+      console.log(`Resources to be spent: ${JSON.stringify(report.resourcesToBeSpent)}`);
+      console.log(`Construction can start: ${report.canStart ? "yes" : "no"}`);
+      return;
+    }
+
+    if (data.constructionJobs.some((job) => job.blueprintId === blueprintId)) {
+      program.error(`A construction job for blueprint '${blueprintId}' already exists.`);
+    }
+
+    data.blueprints = blueprints;
+
+    const plan = planConstructionStart({
+      blueprint,
+      habitat: data,
+      displayName: options.displayName ?? blueprint.displayName,
+    });
+
+    data.inventory = spendInventoryMaterials(data.inventory, plan.consumedMaterials);
+    data.constructionJobs.push(
+      normalizeConstructionJob({
+        id: `construction_${randomUUID()}`,
+        moduleName: plan.moduleName,
+        blueprintId: blueprint.blueprintId,
+        facilityModuleId: plan.facility.id,
+        facilityModuleName: plan.facility.displayName,
+        totalBuildTicks: plan.totalBuildTicks,
+        remainingBuildTicks: plan.totalBuildTicks,
+        consumedMaterials: plan.consumedMaterials,
+        runtimeAttributes: plan.runtimeAttributes,
+        capabilities: plan.capabilities,
+      }),
+    );
+    await writeData(data);
+
+    console.log(
+      `Started construction for '${plan.displayName}' from blueprint '${blueprint.blueprintId}' using facility '${plan.facility.displayName}'.`,
+    );
   });
 
 program
@@ -914,15 +1139,7 @@ Examples:
       }
 
       for (const module of batteries) {
-        const currentCharge = batteryCharge(module);
-        const nextCharge = Math.max(
-          0,
-          Math.min(
-            100,
-            currentCharge +
-              (chargePerBattery - drainPerBattery * moduleChargeLossMultiplier(module)),
-          ),
-        );
+        const nextCharge = computeBatteryChargeAfterTick(module, chargePerBattery, drainPerBattery);
 
         module.runtimeAttributes = {
           ...module.runtimeAttributes,
@@ -941,7 +1158,12 @@ Examples:
 
       for (const job of data.constructionJobs) {
         const facility = data.modules.find((module) => module.id === job.facilityModuleId);
-        if (!facility || !isModuleAvailableForConstruction(facility) || !hasUsableConstructionPower(data)) {
+        const constructionPower = spendConstructionPower(data, 1);
+        if (
+          !facility ||
+          !isModuleAvailableForConstruction(facility) ||
+          !constructionPower.spent
+        ) {
           pausedConstructionTicks += 1;
           nextJobs.push(job);
           continue;
@@ -1363,6 +1585,7 @@ moduleCommand
   .command("create")
   .description("Start local construction from a cached blueprint.")
   .argument("<name>", "module display name")
+  .option("-d, --display-name <displayName>", "visible module display name")
   .requiredOption("-b, --blueprint-id <blueprintId>", "published blueprint id")
   .addHelpText(
     "after",
@@ -1372,7 +1595,7 @@ Starting construction spends the required local materials and creates a local co
 The finished module appears only after enough ticks complete the job.
 `,
   )
-  .action(async (name: string, options: { blueprintId: string }) => {
+  .action(async (name: string, options: { blueprintId: string; displayName?: string }) => {
     const data = await readData();
     const blueprint = findBlueprint(data, options.blueprintId);
 
@@ -1388,14 +1611,6 @@ The finished module appears only after enough ticks complete the job.
 
     if (blueprint.status !== "published") {
       program.error(`Blueprint '${options.blueprintId}' is not published.`);
-    }
-
-    if (data.modules.some((candidate) => candidate.displayName === name)) {
-      program.error(`A module named '${name}' already exists.`);
-    }
-
-    if (data.constructionJobs.some((job) => job.moduleName === name)) {
-      program.error(`A construction job for '${name}' already exists.`);
     }
 
     const requiredMaterials = normalizeBlueprintInputs(blueprint);
@@ -1465,7 +1680,9 @@ The finished module appears only after enough ticks complete the job.
     );
     await writeData(data);
 
-    console.log(`Started construction for '${name}' using facility '${facility.displayName}'.`);
+    console.log(
+      `Started construction for '${options.displayName ?? name}' using facility '${facility.displayName}'.`,
+    );
   });
 
 moduleCommand
@@ -1481,7 +1698,7 @@ moduleCommand
 
     for (const module of data.modules) {
       console.log(
-        `${slugDisplayName(module.displayName)} | blueprint: ${module.blueprintId} | status: ${moduleStatus(module)} | capabilities: ${module.capabilities.join(", ")}`,
+        `${module.name} | display: ${module.displayName} | blueprint: ${module.blueprintId} | status: ${moduleStatus(module)} | capabilities: ${module.capabilities.join(", ")}`,
       );
     }
   });
@@ -1551,14 +1768,15 @@ moduleCommand
     const { data, module } = await findModule(name);
     const isBattery = moduleIsBattery(module);
 
-    console.log(`Name: ${slugDisplayName(module.displayName)}`);
+    console.log(`Name: ${module.name}`);
+    console.log(`Display name: ${module.displayName}`);
     console.log(`ID: ${module.id}`);
     console.log(`Blueprint: ${module.blueprintId}`);
     console.log(`Status: ${moduleStatus(module)}`);
     console.log(`Connected to: ${module.connectedTo.length > 0 ? module.connectedTo.join(", ") : "none"}`);
     console.log(`Capabilities: ${module.capabilities.length > 0 ? module.capabilities.join(", ") : "none"}`);
     if (isBattery) {
-      console.log(`Charge: ${formatCharge(batteryCharge(module))}/100`);
+      console.log(`Charge: ${formatCharge(batteryCharge(module))}/${BATTERY_MAX_CHARGE}`);
     }
     console.log(`Runtime attributes: ${JSON.stringify(module.runtimeAttributes, null, 2)}`);
   });
@@ -1566,7 +1784,7 @@ moduleCommand
 moduleCommand
   .command("update")
   .description("Update a module.")
-  .argument("<name>", "module display name")
+  .argument("<name>", "module name, id, or display name")
   .option("-n, --name <newName>", "new module display name")
   .option("-s, --status <status>", "new module status")
   .action(async (name: string, options: { name?: string; status?: string }) => {
@@ -1600,7 +1818,7 @@ moduleCommand
 moduleCommand
   .command("delete")
   .description("Delete a module.")
-  .argument("<name>", "module display name")
+  .argument("<name>", "module name, id, or display name")
   .action(async (name: string) => {
     const data = await readData();
     const nextModules = data.modules.filter((module) => module.displayName !== name);
@@ -1929,6 +2147,141 @@ constructionCommand.on("command:*", ([command]) => {
 });
 
 program.addCommand(constructionCommand);
+
+const debugCommand = new Command("debug")
+  .description("Debug-only commands for local habitat state.")
+  .showHelpAfterError("Try 'habitat debug --help' to see debug commands.")
+  .addHelpText(
+    "after",
+    `
+Commands:
+  habitat debug construct <blueprint-id>
+
+Notes:
+  debug commands are intentionally unsafe and bypass normal habitat readiness checks.
+`,
+  );
+
+debugCommand
+  .command("construct")
+  .description("Force create a module from a Kepler blueprint.")
+  .argument("<blueprint-id>", "published blueprint id")
+  .option("-d, --display-name <displayName>", "visible module display name")
+  .addHelpText(
+    "after",
+    `
+This command skips the normal facility, inventory, prerequisite, and power checks.
+It still fetches the blueprint from Kepler and stores the created module locally.
+
+Examples:
+  habitat debug construct greenhouse
+`,
+  )
+  .action(async (blueprintId: string, options: { displayName?: string }) => {
+    const data = await readData();
+    const blueprints = await fetchKeplerBlueprintCatalog();
+    const blueprint = blueprints.find(
+      (candidate) => candidate.blueprintId === blueprintId || candidate.id === blueprintId,
+    );
+
+    if (!blueprint) {
+      program.error(`No blueprint with id '${blueprintId}' exists in Kepler.`);
+      throw new Error("Unreachable after Commander exits.");
+    }
+
+    const forced = forceConstructionStart({
+      blueprint,
+      habitat: data,
+      displayName: options.displayName ?? blueprint.displayName,
+    });
+
+    data.modules.push(
+      normalizeModule({
+        id: `module_${randomUUID()}`,
+        name: forced.name,
+        blueprintId: forced.blueprintId,
+        displayName: forced.displayName,
+        connectedTo: [],
+        runtimeAttributes: {
+          ...cloneJson(forced.runtimeAttributes),
+          state: "online",
+          status: "online",
+        },
+        capabilities: [...forced.capabilities],
+      }),
+    );
+    data.blueprints = blueprints;
+    await writeData(data);
+
+    console.log(`Force created module '${forced.displayName}' from blueprint '${forced.blueprintId}'.`);
+  });
+
+debugCommand
+  .command("recharge-batteries")
+  .description("Recharge all local batteries to full charge.")
+  .addHelpText(
+    "after",
+    `
+This command skips normal gameplay constraints and fully recharges every local battery module.
+
+Examples:
+  habitat debug recharge-batteries
+`,
+  )
+  .action(async () => {
+    const data = await readData();
+    let recharged = 0;
+
+    for (const module of data.modules) {
+      if (!moduleIsBattery(module)) {
+        continue;
+      }
+
+      setBatteryCharge(module, BATTERY_MAX_CHARGE);
+      recharged += 1;
+    }
+
+    await writeData(data);
+    console.log(`Recharged ${recharged} batterie(s) to full charge.`);
+  });
+
+debugCommand
+  .command("battery-drain")
+  .description("Show the per-tick construction drain for every local battery.")
+  .addHelpText(
+    "after",
+    `
+This command reports the battery multiplier and exact construction drain value used by ticks.
+
+Examples:
+  habitat debug battery-drain
+`,
+  )
+  .action(async () => {
+    const data = await readData();
+    const batteries = data.modules.filter((module) => moduleIsBattery(module));
+
+    if (batteries.length === 0) {
+      console.log("No batteries found.");
+      return;
+    }
+
+    for (const module of batteries) {
+      const multiplier = module.runtimeAttributes.chargeLossPerTickMult;
+      const drain = batteryConstructionDrainPerTick(module);
+      console.log(
+        `${module.displayName} | chargeLossPerTickMult: ${typeof multiplier === "number" ? multiplier : 1} | construction drain per tick: ${drain}`,
+      );
+    }
+  });
+
+debugCommand.on("command:*", ([command]) => {
+  debugCommand.error(`Habitat does not know the debug command '${command}'.`, {
+    code: "commander.unknownCommand",
+  });
+});
+
+program.addCommand(debugCommand);
 
 const door = new Command("door")
   .description("Manage doors.")
