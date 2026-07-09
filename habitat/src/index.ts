@@ -31,6 +31,8 @@ type HabitatPowerTick = {
   powerConsumedTicks: number;
 };
 
+type HabitatInventory = Record<string, number>;
+
 type HabitatModule = StarterModuleInstance;
 
 type ModuleState = "online" | "offline" | "idle" | "active" | "damaged";
@@ -54,12 +56,27 @@ type ProductionBlueprint = KeplerBlueprintCatalogEntry;
 
 type ResourceCatalogEntry = KeplerResourceCatalogEntry;
 
+type ConstructionJob = {
+  id: string;
+  moduleName: string;
+  blueprintId: string;
+  facilityModuleId: string;
+  facilityModuleName: string;
+  totalBuildTicks: number;
+  remainingBuildTicks: number;
+  consumedMaterials: Record<string, number>;
+  runtimeAttributes: Record<string, unknown>;
+  capabilities: string[];
+};
+
 type HabitatData = {
   zones: Zone[];
   airlocks: Airlock[];
   doors: Door[];
   modules: HabitatModule[];
   blueprints: ProductionBlueprint[];
+  inventory: HabitatInventory;
+  constructionJobs: ConstructionJob[];
   power: HabitatPowerTick;
   registration?: HabitatRegistration;
 };
@@ -74,6 +91,8 @@ function createEmptyData(): HabitatData {
     doors: [],
     modules: [],
     blueprints: [],
+    inventory: {},
+    constructionJobs: [],
     power: {
       powerConsumedTicks: 0,
     },
@@ -92,6 +111,21 @@ function normalizeData(data: unknown): HabitatData {
   const blueprints = Array.isArray(candidate.blueprints)
     ? candidate.blueprints
     : [];
+  const inventory =
+    candidate.inventory && typeof candidate.inventory === "object"
+      ? Object.fromEntries(
+          Object.entries(candidate.inventory).filter(
+            ([key, value]) =>
+              typeof key === "string" &&
+              typeof value === "number" &&
+              Number.isFinite(value) &&
+              value >= 0,
+          ),
+        )
+      : {};
+  const constructionJobs = Array.isArray(candidate.constructionJobs)
+    ? (candidate.constructionJobs as ConstructionJob[])
+    : [];
 
   return {
     zones: Array.isArray(candidate.zones) ? candidate.zones : [],
@@ -99,6 +133,8 @@ function normalizeData(data: unknown): HabitatData {
     doors: Array.isArray(candidate.doors) ? candidate.doors : [],
     modules,
     blueprints,
+    inventory,
+    constructionJobs,
     power:
       candidate.power && typeof candidate.power === "object"
         ? {
@@ -151,6 +187,173 @@ function normalizeModule(module: HabitatModule): HabitatModule {
     runtimeAttributes: cloneJson(module.runtimeAttributes),
     capabilities: [...module.capabilities],
   };
+}
+
+function normalizeConstructionJob(job: ConstructionJob): ConstructionJob {
+  return {
+    id: job.id,
+    moduleName: job.moduleName,
+    blueprintId: job.blueprintId,
+    facilityModuleId: job.facilityModuleId,
+    facilityModuleName: job.facilityModuleName,
+    totalBuildTicks: job.totalBuildTicks,
+    remainingBuildTicks: job.remainingBuildTicks,
+    consumedMaterials: cloneJson(job.consumedMaterials),
+    runtimeAttributes: cloneJson(job.runtimeAttributes),
+    capabilities: [...job.capabilities],
+  };
+}
+
+function normalizeBlueprintInputs(blueprint: ProductionBlueprint): Record<string, number> {
+  if (!blueprint.inputs || typeof blueprint.inputs !== "object") {
+    return {};
+  }
+
+  const normalizedInputs: Record<string, number> = {};
+
+  for (const [resourceId, amount] of Object.entries(blueprint.inputs)) {
+    if (
+      typeof resourceId === "string" &&
+      typeof amount === "number" &&
+      Number.isFinite(amount) &&
+      amount > 0
+    ) {
+      normalizedInputs[resourceId] = amount;
+    }
+  }
+
+  return normalizedInputs;
+}
+
+function blueprintModuleType(blueprint: ProductionBlueprint): string | undefined {
+  const moduleType = blueprint.output?.moduleType;
+  return typeof moduleType === "string" && moduleType.length > 0 ? moduleType : undefined;
+}
+
+function blueprintOutputLevel(blueprint: ProductionBlueprint): number | undefined {
+  const level = blueprint.output?.level;
+  return typeof level === "number" && Number.isFinite(level) ? level : undefined;
+}
+
+function isModuleAvailableForConstruction(module: HabitatModule): boolean {
+  const state = moduleCurrentState(module);
+  return state === "online" || state === "idle" || state === "active";
+}
+
+function moduleLevel(module: HabitatModule): number {
+  const explicitLevel = module.runtimeAttributes.level ?? module.runtimeAttributes.blueprintLevel;
+  if (typeof explicitLevel === "number" && Number.isFinite(explicitLevel)) {
+    return explicitLevel;
+  }
+
+  return 1;
+}
+
+function isFacilityBusy(data: HabitatData, moduleId: string): boolean {
+  return data.constructionJobs.some((job) => job.facilityModuleId === moduleId);
+}
+
+function hasLocalPrerequisite(data: HabitatData, prerequisite: string): boolean {
+  return data.modules.some(
+    (module) =>
+      module.blueprintId === prerequisite ||
+      blueprintOutputTypeFromModule(module) === prerequisite ||
+      module.capabilities.includes(prerequisite),
+  );
+}
+
+function blueprintOutputTypeFromModule(module: HabitatModule): string | undefined {
+  const moduleType = module.runtimeAttributes.moduleType;
+  return typeof moduleType === "string" && moduleType.length > 0 ? moduleType : undefined;
+}
+
+function findAvailableFacility(
+  data: HabitatData,
+  blueprint: ProductionBlueprint,
+): HabitatModule | undefined {
+  const requiredFacility = blueprint.requiredFacility;
+  if (!requiredFacility || typeof requiredFacility !== "object") {
+    return undefined;
+  }
+
+  const moduleType = requiredFacility.moduleType;
+  const minimumLevel =
+    typeof requiredFacility.minimumLevel === "number" && Number.isFinite(requiredFacility.minimumLevel)
+      ? requiredFacility.minimumLevel
+      : 1;
+
+  if (typeof moduleType !== "string" || moduleType.length === 0) {
+    return undefined;
+  }
+
+  return data.modules.find(
+    (module) =>
+      (module.blueprintId === moduleType || blueprintOutputTypeFromModule(module) === moduleType) &&
+      isModuleAvailableForConstruction(module) &&
+      moduleLevel(module) >= minimumLevel &&
+      !isFacilityBusy(data, module.id),
+  );
+}
+
+function hasOnlineSupplyOrLogistics(data: HabitatData): boolean {
+  return data.modules.some(
+    (module) =>
+      isModuleAvailableForConstruction(module) &&
+      (module.blueprintId === "supply-cache" ||
+        blueprintOutputTypeFromModule(module) === "supply-cache" ||
+        module.capabilities.includes("logistics")),
+  );
+}
+
+function inventoryHasMaterials(
+  inventory: HabitatInventory,
+  requiredMaterials: Record<string, number>,
+): boolean {
+  return Object.entries(requiredMaterials).every(
+    ([resourceId, amount]) => (inventory[resourceId] ?? 0) >= amount,
+  );
+}
+
+function spendInventoryMaterials(
+  inventory: HabitatInventory,
+  requiredMaterials: Record<string, number>,
+): HabitatInventory {
+  const nextInventory = { ...inventory };
+
+  for (const [resourceId, amount] of Object.entries(requiredMaterials)) {
+    nextInventory[resourceId] = Math.max(0, (nextInventory[resourceId] ?? 0) - amount);
+  }
+
+  return nextInventory;
+}
+
+function hasUsableConstructionPower(data: HabitatData): boolean {
+  return data.modules.some((module) => {
+    if (!isModuleAvailableForConstruction(module)) {
+      return false;
+    }
+
+    if (moduleIsCharger(module)) {
+      return true;
+    }
+
+    return moduleIsBattery(module) && batteryCharge(module) > 0;
+  });
+}
+
+function createModuleFromConstructionJob(job: ConstructionJob): HabitatModule {
+  return normalizeModule({
+    id: `module_${randomUUID()}`,
+    blueprintId: job.blueprintId,
+    displayName: job.moduleName,
+    connectedTo: [],
+    runtimeAttributes: {
+      ...cloneJson(job.runtimeAttributes),
+      state: "online",
+      status: "online",
+    },
+    capabilities: [...job.capabilities],
+  });
 }
 
 function moduleStatus(module: HabitatModule): string {
@@ -207,21 +410,28 @@ function moduleCurrentPowerDraw(module: HabitatModule): number {
   return 0;
 }
 
-function moduleChargeLossMultiplier(data: HabitatData, module: HabitatModule): number {
+function moduleHasFlag(
+  module: HabitatModule,
+  flag: "isBattery" | "isCharger",
+): boolean {
+  if (module.runtimeAttributes && module.runtimeAttributes[flag] === true) {
+    return true;
+  }
+
+  return module.capabilities.includes(flag);
+}
+
+function moduleChargeLossMultiplier(module: HabitatModule): number {
   const fromModule = module.runtimeAttributes.chargeLossPerTickMult;
   if (typeof fromModule === "number" && Number.isFinite(fromModule)) {
     return Math.min(1, Math.max(0.01, fromModule));
   }
 
-  const blueprint = findBlueprintForModule(data, module);
-  const fromBlueprint = blueprint?.runtimeAttributes?.chargeLossPerTickMult;
-  return parseChargeLossMultiplier(fromBlueprint);
+  return 1;
 }
 
-function chargerChargeRate(data: HabitatData, module: HabitatModule): number {
-  const blueprint = findBlueprintForModule(data, module);
-
-  if (!blueprint || !blueprintHasFlag(blueprint, "isCharger")) {
+function chargerChargeRate(module: HabitatModule): number {
+  if (!moduleHasFlag(module, "isCharger")) {
     return 0;
   }
 
@@ -231,16 +441,14 @@ function chargerChargeRate(data: HabitatData, module: HabitatModule): number {
       return runtimeRate;
     }
 
-    const blueprintRate = blueprint.runtimeAttributes?.chargePerTick;
-    if (typeof blueprintRate === "number" && Number.isFinite(blueprintRate)) {
-      return blueprintRate;
-    }
-
     return 1;
   })();
 
+  const upgradeLevelValue = module.runtimeAttributes.blueprintLevel ?? module.runtimeAttributes.level;
   const upgradeLevel =
-    typeof blueprint.level === "number" && Number.isFinite(blueprint.level) ? blueprint.level : 0;
+    typeof upgradeLevelValue === "number" && Number.isFinite(upgradeLevelValue)
+      ? upgradeLevelValue
+      : 0;
 
   return baseRate * Math.pow(1.5, upgradeLevel);
 }
@@ -357,13 +565,6 @@ async function findModuleById(
   return { data, module };
 }
 
-function findBlueprintForModule(
-  data: HabitatData,
-  module: HabitatModule,
-): ProductionBlueprint | undefined {
-  return data.blueprints.find((candidate) => candidate.blueprintId === module.blueprintId);
-}
-
 function blueprintHasFlag(
   blueprint: ProductionBlueprint | undefined,
   flag: "isBattery" | "isCharger",
@@ -379,16 +580,16 @@ function blueprintHasFlag(
   return Array.isArray(blueprint.capabilities) && blueprint.capabilities.includes(flag);
 }
 
-function moduleIsBattery(data: HabitatData, module: HabitatModule): boolean {
-  return blueprintHasFlag(findBlueprintForModule(data, module), "isBattery");
+function moduleIsBattery(module: HabitatModule): boolean {
+  return moduleHasFlag(module, "isBattery");
 }
 
-function moduleIsCharger(data: HabitatData, module: HabitatModule): boolean {
-  return blueprintHasFlag(findBlueprintForModule(data, module), "isCharger");
+function moduleIsCharger(module: HabitatModule): boolean {
+  return moduleHasFlag(module, "isCharger");
 }
 
-function batteryCharge(module: HabitatModule, data: HabitatData): number {
-  if (!moduleIsBattery(data, module)) {
+function batteryCharge(module: HabitatModule): number {
+  if (!moduleIsBattery(module)) {
     return Number.NaN;
   }
 
@@ -462,6 +663,16 @@ function parseTickCount(value: string): number {
   return tickCount;
 }
 
+function parseInventoryAmount(value: string): number {
+  const amount = Number(value);
+
+  if (!Number.isFinite(amount) || amount < 0) {
+    throw new InvalidArgumentError("inventory amount must be a non-negative number.");
+  }
+
+  return amount;
+}
+
 const program = new Command();
 
 program
@@ -482,6 +693,8 @@ Object schemas:
   airlock: { name: string, pressureLevel: number, locked: boolean }
   door:    { name: string, airlockName?: string }
   module:  { id: string, blueprintId: string, displayName: string, connectedTo: string[], runtimeAttributes: object, capabilities: string[] }
+  inventory: { [resourceId: string]: number }
+  construction: { id: string, moduleName: string, blueprintId: string, facilityModuleId: string, remainingBuildTicks: number, totalBuildTicks: number }
   power:   { powerConsumedTicks: number }
 
 Command map:
@@ -511,6 +724,10 @@ Command map:
   habitat blueprint list
   habitat blueprint show <blueprint-id>
   habitat resource list
+  habitat inventory list
+  habitat inventory set <resource-id> <amount>
+  habitat construction list
+  habitat construction cancel <job-id>
   habitat door create <name>
   habitat door list
   habitat door show <name>
@@ -530,6 +747,8 @@ Common workflow:
   habitat blueprint list
   habitat blueprint show greenhouse
   habitat resource list
+  habitat inventory set basalt-composite 500
+  habitat construction list
   habitat zone create kitchen --purpose cooking --status active
   habitat airlock create main --pressure-level 2.5 --locked true
   habitat door create outer
@@ -539,7 +758,7 @@ Common workflow:
 
 Data:
   Stored in .habitat/data.json in the current working directory.
-  The file shape is { "zones": [], "airlocks": [], "doors": [], "modules": [], "blueprints": [], "power": { "powerConsumedTicks": 0 }, "registration": {} }.
+  The file shape is { "zones": [], "airlocks": [], "doors": [], "modules": [], "blueprints": [], "inventory": {}, "constructionJobs": [], "power": { "powerConsumedTicks": 0 }, "registration": {} }.
 `,
   );
 
@@ -625,6 +844,8 @@ Examples:
     console.log(`Doors: ${data.doors.length}`);
     console.log(`Modules: ${data.modules.length}`);
     console.log(`Blueprints: ${data.blueprints.length}`);
+    console.log(`Inventory resources: ${Object.keys(data.inventory).length}`);
+    console.log(`Construction jobs: ${data.constructionJobs.length}`);
     console.log(`Power consumed ticks: ${data.power.powerConsumedTicks}`);
 
     if (data.modules.length > 0) {
@@ -643,8 +864,8 @@ program
   .addHelpText(
     "after",
     `
-For now, tick only updates local power consumption counters.
-Each tick increments powerConsumedTicks on every stored module.
+Each tick updates local power consumption counters.
+Construction jobs advance one tick at a time when the habitat has usable power.
 
 Examples:
   habitat tick 1
@@ -653,60 +874,113 @@ Examples:
   )
   .action(async (count: number) => {
     const data = await readData();
-    const totalPowerDraw = sumModulePowerDraw(data.modules);
-    const batteries = data.modules.filter((module) => moduleIsBattery(data, module));
-    const onlineConsumers = data.modules.filter(
-      (module) =>
-        moduleCurrentState(module) === "online" &&
-        !moduleIsBattery(data, module) &&
-        !moduleIsCharger(data, module),
-    );
-    const onlineChargers = data.modules.filter(
-      (module) => moduleCurrentState(module) === "online" && moduleIsCharger(data, module),
-    );
-    const totalDrain = onlineConsumers.length;
-    const totalCharge = onlineChargers.reduce((total, module) => total + chargerChargeRate(data, module), 0);
-    const drainPerBattery = batteries.length > 0 ? totalDrain / batteries.length : 0;
-    const chargePerBattery = batteries.length > 0 ? totalCharge / batteries.length : 0;
+    const completedJobs: string[] = [];
+    let advancedConstructionTicks = 0;
+    let pausedConstructionTicks = 0;
+    let energyCost = 0;
 
-    for (const module of data.modules) {
-      const currentPowerTicks = module.runtimeAttributes.powerConsumedTicks;
-      const modulePowerDraw = moduleCurrentPowerDraw(module);
-      const moduleTickCost = modulePowerDraw * count;
-      const nextPowerTicks =
-        typeof currentPowerTicks === "number" && Number.isFinite(currentPowerTicks)
-          ? currentPowerTicks + moduleTickCost
-          : moduleTickCost;
-
-      module.runtimeAttributes = {
-        ...module.runtimeAttributes,
-        powerConsumedTicks: nextPowerTicks,
-      };
-    }
-
-    for (const module of batteries) {
-      const currentCharge = batteryCharge(module, data);
-      const nextCharge = Math.max(
-        0,
-        Math.min(
-          100,
-          currentCharge +
-            (chargePerBattery - drainPerBattery * moduleChargeLossMultiplier(data, module)) * count,
-        ),
+    for (let step = 0; step < count; step += 1) {
+      const totalPowerDraw = sumModulePowerDraw(data.modules);
+      const batteries = data.modules.filter((module) => moduleIsBattery(module));
+      const onlineConsumers = data.modules.filter(
+        (module) =>
+          moduleCurrentState(module) === "online" &&
+          !moduleIsBattery(module) &&
+          !moduleIsCharger(module),
       );
+      const onlineChargers = data.modules.filter(
+        (module) => moduleCurrentState(module) === "online" && moduleIsCharger(module),
+      );
+      const totalDrain = onlineConsumers.length;
+      const totalCharge = onlineChargers.reduce(
+        (total, module) => total + chargerChargeRate(module),
+        0,
+      );
+      const drainPerBattery = batteries.length > 0 ? totalDrain / batteries.length : 0;
+      const chargePerBattery = batteries.length > 0 ? totalCharge / batteries.length : 0;
 
-      module.runtimeAttributes = {
-        ...module.runtimeAttributes,
-        charge: nextCharge,
-      };
+      for (const module of data.modules) {
+        const currentPowerTicks = module.runtimeAttributes.powerConsumedTicks;
+        const modulePowerDraw = moduleCurrentPowerDraw(module);
+        const nextPowerTicks =
+          typeof currentPowerTicks === "number" && Number.isFinite(currentPowerTicks)
+            ? currentPowerTicks + modulePowerDraw
+            : modulePowerDraw;
+
+        module.runtimeAttributes = {
+          ...module.runtimeAttributes,
+          powerConsumedTicks: nextPowerTicks,
+        };
+      }
+
+      for (const module of batteries) {
+        const currentCharge = batteryCharge(module);
+        const nextCharge = Math.max(
+          0,
+          Math.min(
+            100,
+            currentCharge +
+              (chargePerBattery - drainPerBattery * moduleChargeLossMultiplier(module)),
+          ),
+        );
+
+        module.runtimeAttributes = {
+          ...module.runtimeAttributes,
+          charge: nextCharge,
+        };
+      }
+
+      data.power.powerConsumedTicks += totalPowerDraw;
+      energyCost += totalPowerDraw;
+
+      if (data.constructionJobs.length === 0) {
+        continue;
+      }
+
+      const nextJobs: ConstructionJob[] = [];
+
+      for (const job of data.constructionJobs) {
+        const facility = data.modules.find((module) => module.id === job.facilityModuleId);
+        if (!facility || !isModuleAvailableForConstruction(facility) || !hasUsableConstructionPower(data)) {
+          pausedConstructionTicks += 1;
+          nextJobs.push(job);
+          continue;
+        }
+
+        const remainingBuildTicks = job.remainingBuildTicks - 1;
+        advancedConstructionTicks += 1;
+
+        if (remainingBuildTicks <= 0) {
+          data.modules.push(createModuleFromConstructionJob(job));
+          completedJobs.push(job.moduleName);
+          continue;
+        }
+
+        nextJobs.push(
+          normalizeConstructionJob({
+            ...job,
+            remainingBuildTicks,
+          }),
+        );
+      }
+
+      data.constructionJobs = nextJobs;
     }
 
-    data.power.powerConsumedTicks += totalPowerDraw * count;
     await writeData(data);
 
     console.log(`Advanced habitat by ${count} tick(s).`);
     console.log(`Updated power consumption counters on ${data.modules.length} module(s).`);
-    console.log(`Energy cost for ${count} tick(s): ${totalPowerDraw * count}`);
+    console.log(`Energy cost for ${count} tick(s): ${energyCost}`);
+    if (advancedConstructionTicks > 0) {
+      console.log(`Advanced ${advancedConstructionTicks} construction tick(s).`);
+    }
+    if (pausedConstructionTicks > 0) {
+      console.log(`Paused ${pausedConstructionTicks} construction tick(s) due to unavailable power.`);
+    }
+    if (completedJobs.length > 0) {
+      console.log(`Completed modules: ${completedJobs.join(", ")}.`);
+    }
   });
 
 const zone = new Command("zone")
@@ -1053,7 +1327,9 @@ Commands:
 
 Notes:
   name is the lookup key and displayName for local modules.
-  create is blueprint-driven and uses the cached blueprint catalog.
+  create starts a local construction job from the cached blueprint catalog.
+  the finished module appears only after enough ticks complete the job.
+  once built, the module is independent from the catalog.
   -l lists the cached blueprint ids and display names.
   update changes the display name and/or runtime status.
   status reads runtimeAttributes.state first, then runtimeAttributes.status.
@@ -1085,13 +1361,15 @@ moduleCommand.action(async (options: { listBlueprints?: boolean } = {}) => {
 
 moduleCommand
   .command("create")
-  .description("Create a module from a cached blueprint.")
+  .description("Start local construction from a cached blueprint.")
   .argument("<name>", "module display name")
   .requiredOption("-b, --blueprint-id <blueprintId>", "published blueprint id")
   .addHelpText(
     "after",
     `
 The blueprint must exist in the cached blueprint catalog and must output a module.
+Starting construction spends the required local materials and creates a local construction job.
+The finished module appears only after enough ticks complete the job.
 `,
   )
   .action(async (name: string, options: { blueprintId: string }) => {
@@ -1108,18 +1386,78 @@ The blueprint must exist in the cached blueprint catalog and must output a modul
       throw new Error("Unreachable after Commander exits.");
     }
 
+    if (blueprint.status !== "published") {
+      program.error(`Blueprint '${options.blueprintId}' is not published.`);
+    }
+
     if (data.modules.some((candidate) => candidate.displayName === name)) {
       program.error(`A module named '${name}' already exists.`);
     }
 
-    data.modules.push(
-      normalizeModule({
-        id: `module_${randomUUID()}`,
+    if (data.constructionJobs.some((job) => job.moduleName === name)) {
+      program.error(`A construction job for '${name}' already exists.`);
+    }
+
+    const requiredMaterials = normalizeBlueprintInputs(blueprint);
+    if (!inventoryHasMaterials(data.inventory, requiredMaterials)) {
+      program.error(`Local inventory does not contain the required materials for '${options.blueprintId}'.`);
+    }
+
+    if (!hasOnlineSupplyOrLogistics(data)) {
+      program.error("Construction requires an online supply cache or logistics module.");
+    }
+
+    if (!hasUsableConstructionPower(data)) {
+      program.error("Construction requires usable habitat power.");
+    }
+
+    if (Array.isArray(blueprint.prerequisites)) {
+      const missingPrerequisite = blueprint.prerequisites.find(
+        (prerequisite) => !hasLocalPrerequisite(data, prerequisite),
+      );
+
+      if (missingPrerequisite) {
+        program.error(`Missing prerequisite '${missingPrerequisite}' for '${options.blueprintId}'.`);
+      }
+    }
+
+    const facility = findAvailableFacility(data, blueprint);
+    if (!facility) {
+      program.error(`No available facility can build '${options.blueprintId}'.`);
+      throw new Error("Unreachable after Commander exits.");
+    }
+
+    const buildTicksCandidate = blueprint.buildTicks;
+    if (
+      typeof buildTicksCandidate !== "number" ||
+      !Number.isFinite(buildTicksCandidate) ||
+      buildTicksCandidate <= 0
+    ) {
+      program.error(`Blueprint '${options.blueprintId}' does not define a valid build time.`);
+      throw new Error("Unreachable after Commander exits.");
+    }
+    const buildTicks = buildTicksCandidate;
+
+    data.inventory = spendInventoryMaterials(data.inventory, requiredMaterials);
+    data.constructionJobs.push(
+      normalizeConstructionJob({
+        id: `construction_${randomUUID()}`,
+        moduleName: name,
         blueprintId: blueprint.blueprintId,
-        displayName: name,
-        connectedTo: [],
+        facilityModuleId: facility.id,
+        facilityModuleName: facility.displayName,
+        totalBuildTicks: buildTicks,
+        remainingBuildTicks: buildTicks,
+        consumedMaterials: requiredMaterials,
         runtimeAttributes: {
           ...cloneJson(blueprint.runtimeAttributes ?? {}),
+          ...(typeof blueprint.level === "number" && Number.isFinite(blueprint.level)
+            ? { blueprintLevel: blueprint.level }
+            : {}),
+          ...(typeof blueprintOutputLevel(blueprint) === "number"
+            ? { level: blueprintOutputLevel(blueprint) }
+            : {}),
+          ...(blueprintModuleType(blueprint) ? { moduleType: blueprintModuleType(blueprint) } : {}),
           ...(blueprintHasFlag(blueprint, "isBattery") ? { charge: 100 } : {}),
         },
         capabilities: [...(blueprint.capabilities ?? [])],
@@ -1127,7 +1465,7 @@ The blueprint must exist in the cached blueprint catalog and must output a modul
     );
     await writeData(data);
 
-    console.log(`Created module '${name}'.`);
+    console.log(`Started construction for '${name}' using facility '${facility.displayName}'.`);
   });
 
 moduleCommand
@@ -1176,7 +1514,7 @@ Examples:
       name: slugDisplayName(module.displayName),
       state: moduleCurrentState(module),
       powerDraw: moduleCurrentPowerDraw(module),
-      charge: moduleIsBattery(data, module) ? formatCharge(batteryCharge(module, data)) : "-",
+      charge: moduleIsBattery(module) ? formatCharge(batteryCharge(module)) : "-",
     }));
     const totalPowerDraw = rows.reduce((total, row) => total + row.powerDraw, 0);
 
@@ -1211,7 +1549,7 @@ moduleCommand
   .argument("<name>", "module display name")
   .action(async (name: string) => {
     const { data, module } = await findModule(name);
-    const isBattery = moduleIsBattery(data, module);
+    const isBattery = moduleIsBattery(module);
 
     console.log(`Name: ${slugDisplayName(module.displayName)}`);
     console.log(`ID: ${module.id}`);
@@ -1220,7 +1558,7 @@ moduleCommand
     console.log(`Connected to: ${module.connectedTo.length > 0 ? module.connectedTo.join(", ") : "none"}`);
     console.log(`Capabilities: ${module.capabilities.length > 0 ? module.capabilities.join(", ") : "none"}`);
     if (isBattery) {
-      console.log(`Charge: ${formatCharge(batteryCharge(module, data))}/100`);
+      console.log(`Charge: ${formatCharge(batteryCharge(module))}/100`);
     }
     console.log(`Runtime attributes: ${JSON.stringify(module.runtimeAttributes, null, 2)}`);
   });
@@ -1479,6 +1817,118 @@ resourceCommand.on("command:*", ([command]) => {
 });
 
 program.addCommand(resourceCommand);
+
+const inventoryCommand = new Command("inventory")
+  .description("Manage local habitat inventory.")
+  .showHelpAfterError("Try 'habitat inventory --help' to see inventory commands.")
+  .addHelpText(
+    "after",
+    `
+Commands:
+  habitat inventory list
+  habitat inventory set <resource-id> <amount>
+
+Notes:
+  inventory is local habitat state and is separate from the Kepler resource catalog.
+`,
+  );
+
+inventoryCommand
+  .command("list")
+  .description("List local inventory.")
+  .action(async () => {
+    const data = await readData();
+    const entries = Object.entries(data.inventory).sort(([left], [right]) => left.localeCompare(right));
+
+    if (entries.length === 0) {
+      console.log("No local inventory resources found.");
+      return;
+    }
+
+    for (const [resourceId, amount] of entries) {
+      console.log(`${resourceId} | ${amount}`);
+    }
+  });
+
+inventoryCommand
+  .command("set")
+  .description("Set a local inventory amount.")
+  .argument("<resource-id>", "resource id")
+  .argument("<amount>", "resource amount", parseInventoryAmount)
+  .action(async (resourceId: string, amount: number) => {
+    const data = await readData();
+    data.inventory[resourceId] = amount;
+    await writeData(data);
+
+    console.log(`Set local inventory '${resourceId}' to ${amount}.`);
+  });
+
+inventoryCommand.on("command:*", ([command]) => {
+  inventoryCommand.error(`Habitat does not know the inventory command '${command}'.`, {
+    code: "commander.unknownCommand",
+  });
+});
+
+program.addCommand(inventoryCommand);
+
+const constructionCommand = new Command("construction")
+  .description("Inspect local construction jobs.")
+  .showHelpAfterError("Try 'habitat construction --help' to see construction commands.")
+  .addHelpText(
+    "after",
+    `
+Commands:
+  habitat construction list
+  habitat construction cancel <job-id>
+
+Notes:
+  cancel frees the construction facility but does not refund spent materials.
+`,
+  );
+
+constructionCommand
+  .command("list")
+  .description("List local construction jobs.")
+  .action(async () => {
+    const data = await readData();
+
+    if (data.constructionJobs.length === 0) {
+      console.log("No construction jobs found.");
+      return;
+    }
+
+    for (const job of data.constructionJobs) {
+      console.log(
+        `${job.id} | module: ${slugDisplayName(job.moduleName)} | blueprint: ${job.blueprintId} | facility: ${slugDisplayName(job.facilityModuleName)} | remaining: ${job.remainingBuildTicks}/${job.totalBuildTicks}`,
+      );
+    }
+  });
+
+constructionCommand
+  .command("cancel")
+  .description("Cancel a local construction job.")
+  .argument("<job-id>", "construction job id")
+  .action(async (jobId: string) => {
+    const data = await readData();
+    const nextJobs = data.constructionJobs.filter((job) => job.id !== jobId);
+
+    if (nextJobs.length === data.constructionJobs.length) {
+      program.error(`No construction job with id '${jobId}' exists.`);
+    }
+
+    data.constructionJobs = nextJobs;
+    await writeData(data);
+
+    console.log(`Canceled construction job '${jobId}'.`);
+  });
+
+constructionCommand.on("command:*", ([command]) => {
+  constructionCommand.error(`Habitat does not know the construction command '${command}'.`, {
+    code: "commander.unknownCommand",
+  });
+});
+
+program.addCommand(constructionCommand);
 
 const door = new Command("door")
   .description("Manage doors.")
