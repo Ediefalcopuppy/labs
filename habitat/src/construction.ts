@@ -65,6 +65,74 @@ export function batteryConstructionDrainPerTick(module: ConstructionModule): num
   return 1 / (100 * capacityMultiplier);
 }
 
+export function batteryRemainingCapacity(module: ConstructionModule): number {
+  return Math.max(0, batteryStorageCapacity(module) - batteryCharge(module));
+}
+
+export function solarGeneratedChargePerTick(
+  module: ConstructionModule,
+  irradiance: number,
+): number {
+  const powerGenerationKw = (() => {
+    const fromGeneration = module.runtimeAttributes.powerGenerationKw;
+    if (typeof fromGeneration === "number" && Number.isFinite(fromGeneration)) {
+      return fromGeneration;
+    }
+
+    const fromPower = module.runtimeAttributes.powerOutputKw;
+    if (typeof fromPower === "number" && Number.isFinite(fromPower)) {
+      return fromPower;
+    }
+
+    const fromRuntime = module.runtimeAttributes.generationKw;
+    if (typeof fromRuntime === "number" && Number.isFinite(fromRuntime)) {
+      return fromRuntime;
+    }
+
+    return 0;
+  })();
+
+  if (powerGenerationKw <= 0) {
+    return 0;
+  }
+
+  const solarMultiplier = irradiance / 900;
+  const solarEfficiency = 0.5;
+
+  return (powerGenerationKw * solarMultiplier * solarEfficiency) / 3600;
+}
+
+export function applySolarChargeToBattery(
+  module: ConstructionModule,
+  generatedKwhPerTick: number,
+): number {
+  const currentEnergy = batteryCharge(module);
+  return Math.min(batteryStorageCapacity(module), currentEnergy + Math.max(0, generatedKwhPerTick));
+}
+
+export function solarChargePerTick(module: ConstructionModule, irradiance: number): number {
+  if (!module.capabilities.includes("isCharger") && module.runtimeAttributes.isCharger !== true) {
+    return 0;
+  }
+
+  const baseRate = (() => {
+    const runtimeRate = module.runtimeAttributes.chargePerTick;
+    if (typeof runtimeRate === "number" && Number.isFinite(runtimeRate)) {
+      return runtimeRate;
+    }
+
+    return 1;
+  })();
+
+  const upgradeLevelValue = module.runtimeAttributes.blueprintLevel ?? module.runtimeAttributes.level;
+  const upgradeLevel =
+    typeof upgradeLevelValue === "number" && Number.isFinite(upgradeLevelValue)
+      ? upgradeLevelValue
+      : 0;
+
+  return baseRate * irradiance * Math.pow(1.5, upgradeLevel);
+}
+
 export function computeBatteryChargeAfterTick(
   module: ConstructionModule,
   chargePerBattery: number,
@@ -72,15 +140,13 @@ export function computeBatteryChargeAfterTick(
 ): number {
   const currentCharge = batteryCharge(module);
   const selfDischarge = batteryConstructionDrainPerTick(module);
+  const nextCharge = currentCharge +
+    (chargePerBattery - drainPerBattery * moduleChargeLossMultiplier(module)) -
+    selfDischarge;
 
   return Math.max(
     0,
-    Math.min(
-      BATTERY_MAX_CHARGE,
-      currentCharge +
-        (chargePerBattery - drainPerBattery * moduleChargeLossMultiplier(module)) -
-        selfDischarge,
-    ),
+    Math.min(batteryStorageCapacity(module), nextCharge),
   );
 }
 
@@ -118,8 +184,22 @@ function isBatteryModule(module: ConstructionModule): boolean {
 }
 
 function batteryCharge(module: ConstructionModule): number {
+  const currentEnergy = module.runtimeAttributes.currentEnergyKwh;
+  if (typeof currentEnergy === "number" && Number.isFinite(currentEnergy)) {
+    return currentEnergy;
+  }
+
   const charge = module.runtimeAttributes.charge;
-  return typeof charge === "number" && Number.isFinite(charge) ? charge : BATTERY_MAX_CHARGE;
+  return typeof charge === "number" && Number.isFinite(charge) ? charge : batteryStorageCapacity(module);
+}
+
+function batteryStorageCapacity(module: ConstructionModule): number {
+  const storage = module.runtimeAttributes.energyStorageKwh;
+  if (typeof storage === "number" && Number.isFinite(storage) && storage > 0) {
+    return storage;
+  }
+
+  return BATTERY_MAX_CHARGE;
 }
 
 function moduleChargeLossMultiplier(module: ConstructionModule): number {
@@ -141,15 +221,47 @@ export function createUniqueModuleName(
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "");
   const normalizedBase = baseName.length > 0 ? baseName : "module";
-  let candidate = normalizedBase;
-  let suffix = 2;
+  let suffix = 1;
 
-  while (existingNames.includes(candidate)) {
-    candidate = `${normalizedBase}-${suffix}`;
+  while (existingNames.includes(`${normalizedBase}-${suffix}`)) {
     suffix += 1;
   }
 
-  return candidate;
+  return `${normalizedBase}-${suffix}`;
+}
+
+export function normalizeModuleNames<T extends ConstructionModule>(modules: T[]): T[] {
+  const usedNames = new Set(
+    modules
+      .map((module) => (typeof module.name === "string" ? module.name.trim().toLowerCase() : ""))
+      .filter((name) => /^[a-z0-9]+(?:-[a-z0-9]+)*-\d+$/.test(name)),
+  );
+
+  return modules.map((module) => {
+    const sourceName =
+      typeof module.name === "string" && module.name.trim().length > 0
+        ? module.name
+        : typeof module.displayName === "string" && module.displayName.trim().length > 0
+          ? module.displayName
+          : module.blueprintId || module.id;
+    const normalizedName = sourceName
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "") || "module";
+    const suffixMatch = normalizedName.match(/^(.*)-(\d+)$/);
+    const baseName = suffixMatch?.[1] || normalizedName;
+    const currentNameIsAvailable = suffixMatch !== null && usedNames.has(normalizedName);
+    if (currentNameIsAvailable) {
+      usedNames.delete(normalizedName);
+    }
+    const name = currentNameIsAvailable
+      ? normalizedName
+      : createUniqueModuleName(baseName, [...usedNames]);
+
+    usedNames.add(name);
+    return { ...module, name };
+  });
 }
 
 export function spendConstructionPower(
@@ -186,7 +298,9 @@ export function spendConstructionPower(
     const capacityMultiplier = moduleChargeLossMultiplier(module);
     const currentCharge = module.runtimeAttributes.charge;
     const normalizedCharge =
-      typeof currentCharge === "number" && Number.isFinite(currentCharge) ? currentCharge : BATTERY_MAX_CHARGE;
+      typeof currentCharge === "number" && Number.isFinite(currentCharge)
+        ? currentCharge
+        : batteryStorageCapacity(module);
     const scaledConstructionDrain = drawPerBattery / (100 * capacityMultiplier);
     const nextCharge = Math.max(0, normalizedCharge - scaledConstructionDrain);
 

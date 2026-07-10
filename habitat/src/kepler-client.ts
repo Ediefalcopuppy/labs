@@ -63,6 +63,22 @@ type KeplerResourceCatalogResponse =
       data?: unknown;
     };
 
+type KeplerSolarIrradianceResponse =
+  | {
+      solarIrradiance?: {
+        wPerM2?: unknown;
+        condition?: unknown;
+      };
+    }
+  | {
+      data?: {
+        solarIrradiance?: {
+          wPerM2?: unknown;
+          condition?: unknown;
+        };
+      };
+    };
+
 function readKeplerToken(commandHint: string): string {
   const token = process.env.KEPLER_PLANET_TOKEN;
 
@@ -255,6 +271,36 @@ export async function fetchKeplerResourceCatalog(): Promise<KeplerResourceCatalo
 
   const payload = (await response.json()) as KeplerResourceCatalogResponse;
   return extractResourceEntries(payload);
+}
+
+export async function fetchKeplerSolarIrradiance(): Promise<number> {
+  const token = readKeplerToken("habitat tick");
+
+  const response = await fetch(`${keplerBaseUrl}/world/solar-irradiance`, {
+    headers: {
+      Authorization: `Bearer ${token}`,
+    },
+  });
+
+  if (!response.ok) {
+    throw new Error(
+      `Failed to fetch Kepler solar irradiance: ${response.status} ${response.statusText}.`,
+    );
+  }
+
+  const payload = (await response.json()) as KeplerSolarIrradianceResponse;
+  const candidate =
+    payload && typeof payload === "object" && "solarIrradiance" in payload
+      ? payload.solarIrradiance?.wPerM2
+      : payload && typeof payload === "object" && "data" in payload
+        ? payload.data?.solarIrradiance?.wPerM2
+        : undefined;
+
+  if (typeof candidate !== "number" || !Number.isFinite(candidate)) {
+    throw new Error("Kepler solar irradiance response did not include a valid numeric irradiance.");
+  }
+
+  return candidate;
 }
 
 export async function fetchKeplerHabitatRegistration(

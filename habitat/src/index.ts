@@ -7,6 +7,7 @@ import {
   fetchKeplerBlueprintCatalog,
   fetchKeplerHabitatRegistration,
   fetchKeplerResourceCatalog,
+  fetchKeplerSolarIrradiance,
   type KeplerBlueprintCatalogEntry,
   type KeplerHabitat,
   type KeplerResourceCatalogEntry,
@@ -14,12 +15,16 @@ import {
 import {
   BATTERY_MAX_CHARGE,
   batteryConstructionDrainPerTick,
+  applySolarChargeToBattery,
+  batteryRemainingCapacity,
   createUniqueModuleName,
   computeBatteryChargeAfterTick,
   forceConstructionStart,
+  normalizeModuleNames,
   planConstructionStart,
   previewConstructionStart,
   spendConstructionPower,
+  solarGeneratedChargePerTick,
 } from "./construction";
 
 type Zone = {
@@ -417,10 +422,11 @@ function hasUsableConstructionPower(data: HabitatData): boolean {
   });
 }
 
-function createModuleFromConstructionJob(job: ConstructionJob): HabitatModule {
+function createModuleFromConstructionJob(job: ConstructionJob, existingModules: HabitatModule[]): HabitatModule {
+  const moduleName = createUniqueModuleName(job.moduleName, existingModules.map((module) => module.name));
   return normalizeModule({
-    id: `module_${randomUUID()}`,
-    name: `module_${randomUUID()}`,
+    id: moduleName,
+    name: moduleName,
     blueprintId: job.blueprintId,
     displayName: job.moduleName,
     connectedTo: [],
@@ -511,7 +517,7 @@ function moduleIsLegacyBattery(module: HabitatModule): boolean {
   );
 }
 
-function chargerChargeRate(module: HabitatModule): number {
+function chargerChargeRate(module: HabitatModule, irradiance: number): number {
   if (!moduleHasFlag(module, "isCharger")) {
     return 0;
   }
@@ -531,7 +537,7 @@ function chargerChargeRate(module: HabitatModule): number {
       ? upgradeLevelValue
       : 0;
 
-  return baseRate * Math.pow(1.5, upgradeLevel);
+  return baseRate * irradiance * Math.pow(1.5, upgradeLevel);
 }
 
 function sumModulePowerDraw(modules: HabitatModule[]): number {
@@ -676,6 +682,11 @@ function batteryCharge(module: HabitatModule): number {
     return Number.NaN;
   }
 
+  const currentEnergy = module.runtimeAttributes.currentEnergyKwh;
+  if (typeof currentEnergy === "number" && Number.isFinite(currentEnergy)) {
+    return currentEnergy;
+  }
+
   const charge = module.runtimeAttributes.charge;
   return typeof charge === "number" && Number.isFinite(charge) ? charge : BATTERY_MAX_CHARGE;
 }
@@ -687,6 +698,7 @@ function setBatteryCharge(module: HabitatModule, charge: number): void {
 
   module.runtimeAttributes = {
     ...module.runtimeAttributes,
+    currentEnergyKwh: Math.max(0, Math.min(BATTERY_MAX_CHARGE, charge)),
     charge: Math.max(0, Math.min(BATTERY_MAX_CHARGE, charge)),
   };
 }
@@ -814,6 +826,7 @@ Command map:
   habitat module list
   habitat module status
   habitat module set-status <module-id> <status>
+  habitat module normalize-names
   habitat module show <name>
   habitat module update <name> [--name <newName>] [--status <status>]
   habitat module delete <name>
@@ -1001,6 +1014,54 @@ Examples:
     }
   });
 
+const solarCommand = new Command("solar")
+  .description("Inspect live solar conditions from Kepler.")
+  .showHelpAfterError("Try 'habitat solar --help' to see solar commands.")
+  .addHelpText(
+    "after",
+    `
+Commands:
+  habitat solar status
+
+Notes:
+  solar commands read live irradiance from Kepler.
+`,
+  );
+
+solarCommand
+  .command("status")
+  .description("Show live solar irradiance and charger output.")
+  .addHelpText(
+    "after",
+    `
+Reports the current Kepler irradiance value, a normalized solar factor, and the estimated
+charge per tick for local charger modules.
+
+Examples:
+  habitat solar status
+`,
+  )
+  .action(async () => {
+    const data = await readData();
+    const irradiance = await fetchKeplerSolarIrradiance();
+    const chargers = data.modules.filter((module) => moduleIsCharger(module));
+    const totalChargePerTick = chargers.reduce((total, module) => total + chargerChargeRate(module, irradiance), 0);
+    const normalizedSolarFactor = Math.max(0, Math.round(irradiance * 1000) / 1000);
+
+    console.log(`Live irradiance: ${irradiance}`);
+    console.log(`Solar factor: ${normalizedSolarFactor}`);
+    console.log(`Charger modules: ${chargers.length}`);
+    console.log(`Estimated charger output per tick: ${totalChargePerTick}`);
+  });
+
+solarCommand.on("command:*", ([command]) => {
+  solarCommand.error(`Habitat does not know the solar command '${command}'.`, {
+    code: "commander.unknownCommand",
+  });
+});
+
+program.addCommand(solarCommand);
+
 program
   .command("construct")
   .description("Start construction from a live Kepler blueprint.")
@@ -1105,6 +1166,7 @@ Examples:
     let energyCost = 0;
 
     for (let step = 0; step < count; step += 1) {
+      const irradiance = await fetchKeplerSolarIrradiance();
       const totalPowerDraw = sumModulePowerDraw(data.modules);
       const batteries = data.modules.filter((module) => moduleIsBattery(module));
       const onlineConsumers = data.modules.filter(
@@ -1118,11 +1180,17 @@ Examples:
       );
       const totalDrain = onlineConsumers.length;
       const totalCharge = onlineChargers.reduce(
-        (total, module) => total + chargerChargeRate(module),
+        (total, module) => total + chargerChargeRate(module, irradiance),
         0,
       );
       const drainPerBattery = batteries.length > 0 ? totalDrain / batteries.length : 0;
       const chargePerBattery = batteries.length > 0 ? totalCharge / batteries.length : 0;
+      const solarChargers = onlineChargers;
+      const generatedCharge = solarChargers.reduce(
+        (total, module) => total + solarGeneratedChargePerTick(module, irradiance),
+        0,
+      );
+      const totalRemainingCapacity = batteries.reduce((total, module) => total + batteryRemainingCapacity(module), 0);
 
       for (const module of data.modules) {
         const currentPowerTicks = module.runtimeAttributes.powerConsumedTicks;
@@ -1139,11 +1207,26 @@ Examples:
       }
 
       for (const module of batteries) {
-        const nextCharge = computeBatteryChargeAfterTick(module, chargePerBattery, drainPerBattery);
+        const remainingCapacity = batteryRemainingCapacity(module);
+        const batteryShare = totalRemainingCapacity > 0
+          ? generatedCharge * (remainingCapacity / totalRemainingCapacity)
+          : 0;
+        const nextCharge = computeBatteryChargeAfterTick(
+          module,
+          chargePerBattery,
+          drainPerBattery,
+        );
+        module.runtimeAttributes = {
+          ...module.runtimeAttributes,
+          currentEnergyKwh: nextCharge,
+          charge: nextCharge,
+        };
+        const nextSolarCharge = applySolarChargeToBattery(module, batteryShare);
 
         module.runtimeAttributes = {
           ...module.runtimeAttributes,
-          charge: nextCharge,
+          currentEnergyKwh: nextSolarCharge,
+          charge: nextSolarCharge,
         };
       }
 
@@ -1173,7 +1256,7 @@ Examples:
         advancedConstructionTicks += 1;
 
         if (remainingBuildTicks <= 0) {
-          data.modules.push(createModuleFromConstructionJob(job));
+          data.modules.push(createModuleFromConstructionJob(job, data.modules));
           completedJobs.push(job.moduleName);
           continue;
         }
@@ -1543,6 +1626,7 @@ Commands:
   habitat module list
   habitat module status
   habitat module set-status <module-id> <status>
+  habitat module normalize-names
   habitat module show <name>
   habitat module update <name> [--name <newName>] [--status <status>]
   habitat module delete <name>
@@ -1558,6 +1642,7 @@ Notes:
   power draw prefers runtimeAttributes.powerDrawByState, then state-specific power draw fields, then runtimeAttributes.powerDraw.
   batteries also display charge, capped at 100.
   set-status changes only runtimeAttributes.status on the matching module id.
+  normalize-names converts local module names to lowercase slugs with the lowest available numeric suffix.
 `,
   );
 
@@ -1758,6 +1843,27 @@ moduleCommand
     console.log(
       `Updated module '${moduleId}' to status '${status}' (power draw: ${moduleCurrentPowerDraw(module)}).`,
     );
+  });
+
+moduleCommand
+  .command("normalize-names")
+  .description("Convert all local module names to slug-number form.")
+  .action(async () => {
+    const data = await readData();
+    data.modules = normalizeModuleNames(data.modules);
+    const moduleIds = new Map(data.modules.map((module) => [module.id, module.name]));
+    data.modules = data.modules.map((module) => ({
+      ...module,
+      id: module.name,
+      connectedTo: module.connectedTo.map((id) => moduleIds.get(id) ?? id),
+    }));
+    data.constructionJobs = data.constructionJobs.map((job) => ({
+      ...job,
+      facilityModuleId: moduleIds.get(job.facilityModuleId) ?? job.facilityModuleId,
+    }));
+    await writeData(data);
+
+    console.log(`Normalized ${data.modules.length} module name(s).`);
   });
 
 moduleCommand
@@ -2197,7 +2303,7 @@ Examples:
 
     data.modules.push(
       normalizeModule({
-        id: `module_${randomUUID()}`,
+        id: forced.name,
         name: forced.name,
         blueprintId: forced.blueprintId,
         displayName: forced.displayName,

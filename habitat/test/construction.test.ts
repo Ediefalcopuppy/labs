@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
+  createUniqueModuleName,
+  normalizeModuleNames,
   forceConstructionStart,
   planConstructionStart,
   previewConstructionStart,
@@ -7,6 +9,62 @@ import {
 } from "../src/construction";
 
 describe("planConstructionStart", () => {
+  test("normalizes every module name while preserving module data", () => {
+    const modules = [
+      {
+        id: "one",
+        name: "Small Solar Array",
+        displayName: "Solar One",
+        blueprintId: "solar",
+        connectedTo: [],
+        runtimeAttributes: { state: "online" },
+        capabilities: ["isCharger"],
+      },
+      {
+        id: "two",
+        name: "small-solar-array-1",
+        displayName: "Solar Two",
+        blueprintId: "solar",
+        connectedTo: [],
+        runtimeAttributes: { state: "idle" },
+        capabilities: ["isCharger"],
+      },
+    ];
+
+    const result = normalizeModuleNames(modules);
+
+    expect(result.map((module) => module.name)).toEqual(["small-solar-array-2", "small-solar-array-1"]);
+    expect(result[0].id).toBe("one");
+    expect(result[0].displayName).toBe("Solar One");
+    expect(result[0].runtimeAttributes).toEqual({ state: "online" });
+  });
+
+  test("uses legacy display names when a module has no name", () => {
+    const result = normalizeModuleNames([
+      {
+        id: "legacy-1",
+        name: undefined,
+        displayName: "Battery Bank",
+        blueprintId: "battery-bank",
+        connectedTo: [],
+        runtimeAttributes: { state: "online" },
+        capabilities: ["isBattery"],
+      } as never,
+    ]);
+
+    expect(result[0].name).toBe("battery-bank-1");
+    expect(result[0].id).toBe("legacy-1");
+  });
+
+  test("creates module names with the lowest available positive suffix", () => {
+    expect(createUniqueModuleName("Small Solar Array", ["small-solar-array-1", "small-solar-array-2"])).toBe(
+      "small-solar-array-3",
+    );
+    expect(createUniqueModuleName("Small Solar Array", ["small-solar-array-1", "small-solar-array-3"])).toBe(
+      "small-solar-array-2",
+    );
+  });
+
   test("rejects a blueprint that is not published", () => {
     expect(() =>
       planConstructionStart({
@@ -142,8 +200,8 @@ describe("planConstructionStart", () => {
     const spent = spendConstructionPower(habitat, 2);
 
     expect(spent.spent).toBe(true);
-    expect(habitat.modules[0].runtimeAttributes.charge).toBe(9);
-    expect(habitat.modules[1].runtimeAttributes.charge).toBe(9);
+    expect(habitat.modules[0].runtimeAttributes.charge).toBe(9.99);
+    expect(habitat.modules[1].runtimeAttributes.charge).toBe(9.99);
   });
 
   test("treats legacy battery-bank modules as batteries", () => {
