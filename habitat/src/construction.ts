@@ -1,4 +1,4 @@
-import type { KeplerBlueprintCatalogEntry } from "./kepler-client";
+import type { KeplerBlueprintCatalogEntry } from "./kepler/service";
 
 export type ConstructionModule = {
   id: string;
