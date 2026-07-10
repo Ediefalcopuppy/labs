@@ -6,10 +6,12 @@
     "habitat": "./src/index.ts"
   },
   "scripts": {
-    "check": "tsc --noEmit"
+    "check": "tsc --noEmit",
+    "server": "bun run src/server.ts"
   },
   "dependencies": {
-    "commander": "^14.0.0"
+    "commander": "^14.0.0",
+    "hono": "^4.6.10"
   },
   "devDependencies": {
     "@types/bun": "^1.2.0",
