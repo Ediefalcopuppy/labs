@@ -1,0 +1,840 @@
+COMMITS
+7202b33 feat: add backend server shell
+9e75b63 feat: move kepler access behind backend
+
+STAT
+ habitat/.superpowers/sdd/task-1-report.md |  20 ++
+ habitat/.superpowers/sdd/task-3-report.md |  20 ++
+ habitat/bun.lock                          |   3 +
+ habitat/package.json                      |   6 +-
+ habitat/src/construction.ts               |   2 +-
+ habitat/src/kepler-client.ts              | 336 ++----------------------------
+ habitat/src/kepler/client.ts              |  26 +++
+ habitat/src/kepler/service.ts             | 291 ++++++++++++++++++++++++++
+ habitat/src/server.ts                     |  17 ++
+ habitat/src/server/health.ts              |   5 +
+ habitat/src/server/routes.ts              |  27 +++
+ habitat/test/kepler-service.test.ts       |  12 ++
+ habitat/test/server.test.ts               |  11 +
+ 13 files changed, 458 insertions(+), 318 deletions(-)
+
+DIFF
+diff --git a/habitat/bun.lock b/habitat/bun.lock
+index 7d3cabc..f58b69c 100644
+--- a/habitat/bun.lock
++++ b/habitat/bun.lock
+@@ -1,29 +1,32 @@
+ {
+   "lockfileVersion": 1,
+   "configVersion": 1,
+   "workspaces": {
+     "": {
+       "name": "habitat",
+       "dependencies": {
+         "commander": "^14.0.0",
++        "hono": "^4.6.10",
+       },
+       "devDependencies": {
+         "@types/bun": "^1.2.0",
+         "typescript": "^5.8.0",
+       },
+     },
+   },
+   "packages": {
+     "@types/bun": ["@types/bun@1.3.14", "", { "dependencies": { "bun-types": "1.3.14" } }, "sha512-h1hFqFVcvAvD9j9K7ZW7vd82aSA+rTdznZa+5bwvCwqSB1jmmfLcbIWhOLx1/+boy/xmjgCs/OMUL8hRJSmnPw=="],
+ 
+     "@types/node": ["@types/node@26.1.0", "", { "dependencies": { "undici-types": "~8.3.0" } }, "sha512-O0A1G3xPGy4w7AgQdAQYUlQ+BKk2Oovw8eRpofyp5KdBZULnbe+WqaOVNrm705SHphCiG4XHsACrSmPu1f+Kgw=="],
+ 
+     "bun-types": ["bun-types@1.3.14", "", { "dependencies": { "@types/node": "*" } }, "sha512-4N0ig0fEomHt5R0KCFWjovxow98rIoRwKolrYdCcknNwMekCXRnWEUvgu5soYV8QXtVsrUD8B95MBOZGPvr6KQ=="],
+ 
+     "commander": ["commander@14.0.3", "", {}, "sha512-H+y0Jo/T1RZ9qPP4Eh1pkcQcLRglraJaSLoyOtHxu6AapkjWVCy2Sit1QQ4x3Dng8qDlSsZEet7g5Pq06MvTgw=="],
+ 
++    "hono": ["hono@4.12.29", "", {}, "sha512-1hNiRjawYrLq/4m3DQQjPGFg0VZkk4RjQJDff/excI6Dm9BiL75qxGrd7/c6YOxPdq6AscP3LiXhQ6fKFC1Waw=="],
++
+     "typescript": ["typescript@5.9.3", "", { "bin": { "tsc": "bin/tsc", "tsserver": "bin/tsserver" } }, "sha512-jl1vZzPDinLr9eUt3J/t7V6FgNEw9QjvBPdysz9KfQDD41fQrC2Y4vKQdiaUpFT4bXlb1RHhLpp8wtm6M5TgSw=="],
+ 
+     "undici-types": ["undici-types@8.3.0", "", {}, "sha512-j375ScV60dom+YkPFIfTLcOiPxkN/buHz5GobjLhixFuANaNs3C9l4GmrWqejgXWJ7BbJcFYpTEUkS1Ge8bpZQ=="],
+   }
+ }
+diff --git a/habitat/package.json b/habitat/package.json
+index f89a2e3..30084f5 100644
+--- a/habitat/package.json
++++ b/habitat/package.json
+@@ -1,18 +1,20 @@
+ {
+   "name": "habitat",
+   "version": "0.1.0",
+   "type": "module",
+   "bin": {
+     "habitat": "./src/index.ts"
+   },
+   "scripts": {
+-    "check": "tsc --noEmit"
++    "check": "tsc --noEmit",
++    "server": "bun run src/server.ts"
+   },
+   "dependencies": {
+-    "commander": "^14.0.0"
++    "commander": "^14.0.0",
++    "hono": "^4.6.10"
+   },
+   "devDependencies": {
+     "@types/bun": "^1.2.0",
+     "typescript": "^5.8.0"
+   }
+ }
+diff --git a/habitat/src/construction.ts b/habitat/src/construction.ts
+index 01bf3c4..50771c8 100644
+--- a/habitat/src/construction.ts
++++ b/habitat/src/construction.ts
+@@ -1,11 +1,11 @@
+-import type { KeplerBlueprintCatalogEntry } from "./kepler-client";
++import type { KeplerBlueprintCatalogEntry } from "./kepler/service";
+ 
+ export type ConstructionModule = {
+   id: string;
+   name: string;
+   blueprintId: string;
+   displayName: string;
+   connectedTo: string[];
+   runtimeAttributes: Record<string, unknown>;
+   capabilities: string[];
+ };
+diff --git a/habitat/src/kepler-client.ts b/habitat/src/kepler-client.ts
+index dd82794..26bdc4d 100644
+--- a/habitat/src/kepler-client.ts
++++ b/habitat/src/kepler-client.ts
+@@ -1,332 +1,38 @@
+-const keplerBaseUrl = "https://planet.turingguild.com";
++const backendBaseUrl = process.env.HABITAT_BACKEND_URL ?? "http://127.0.0.1:3000";
+ 
+-export type KeplerHabitat = {
+-  id: string;
+-  habitatSlug: string;
+-  displayName: string;
+-  catalogVersion: string;
+-  status: string;
+-  lastSeenAt?: string | null;
+-};
+-
+-type KeplerHabitatResponse = {
+-  habitat?: Partial<KeplerHabitat>;
+-};
+-
+-export type KeplerBlueprintCatalogEntry = {
+-  id?: string;
+-  blueprintId: string;
+-  displayName: string;
+-  description?: string;
+-  status?: string;
+-  output?: Record<string, unknown>;
+-  inputs?: Record<string, unknown>;
+-  productionCost?: Record<string, unknown>;
+-  requiredFacility?: Record<string, unknown>;
+-  buildTicks?: number;
+-  prerequisites?: string[];
+-  unlocks?: string[];
+-  repeatable?: boolean;
+-  level?: number | null;
+-  target?: Record<string, unknown>;
+-  facilityLevel?: Record<string, unknown>;
+-  attachmentPoints?: Record<string, unknown>;
+-  attachmentRequirements?: Record<string, unknown>[];
+-  runtimeAttributes?: Record<string, unknown>;
+-  capabilities?: string[];
+-};
+-
+-type KeplerBlueprintCatalogResponse =
+-  | KeplerBlueprintCatalogEntry[]
+-  | {
+-      blueprints?: unknown;
+-      items?: unknown;
+-      data?: unknown;
+-    };
+-
+-export type KeplerResourceCatalogEntry = {
+-  id?: string;
+-  resourceId?: string;
+-  displayName?: string;
+-  name?: string;
+-  description?: string;
+-  status?: string;
+-  capabilities?: string[];
+-  runtimeAttributes?: Record<string, unknown>;
+-};
+-
+-type KeplerResourceCatalogResponse =
+-  | KeplerResourceCatalogEntry[]
+-  | {
+-      resources?: unknown;
+-      items?: unknown;
+-      data?: unknown;
+-    };
+-
+-type KeplerSolarIrradianceResponse =
+-  | {
+-      solarIrradiance?: {
+-        wPerM2?: unknown;
+-        condition?: unknown;
+-      };
+-    }
+-  | {
+-      data?: {
+-        solarIrradiance?: {
+-          wPerM2?: unknown;
+-          condition?: unknown;
+-        };
+-      };
+-    };
+-
+-function readKeplerToken(commandHint: string): string {
+-  const token = process.env.KEPLER_PLANET_TOKEN;
+-
+-  if (!token) {
+-    throw new Error(`Set KEPLER_PLANET_TOKEN before running '${commandHint}'.`);
+-  }
+-
+-  return token;
+-}
+-
+-function normalizeKeplerHabitat(value: Partial<KeplerHabitat>): KeplerHabitat {
+-  if (typeof value.id !== "string" || value.id.length === 0) {
+-    throw new Error("Kepler returned a habitat without a valid id.");
+-  }
+-
+-  if (typeof value.habitatSlug !== "string" || value.habitatSlug.length === 0) {
+-    throw new Error("Kepler returned a habitat without a valid habitatSlug.");
+-  }
+-
+-  if (typeof value.displayName !== "string" || value.displayName.length === 0) {
+-    throw new Error("Kepler returned a habitat without a valid displayName.");
+-  }
+-
+-  if (typeof value.catalogVersion !== "string" || value.catalogVersion.length === 0) {
+-    throw new Error("Kepler returned a habitat without a valid catalogVersion.");
+-  }
+-
+-  if (typeof value.status !== "string" || value.status.length === 0) {
+-    throw new Error("Kepler returned a habitat without a valid status.");
+-  }
+-
+-  return {
+-    id: value.id,
+-    habitatSlug: value.habitatSlug,
+-    displayName: value.displayName,
+-    catalogVersion: value.catalogVersion,
+-    status: value.status,
+-    lastSeenAt:
+-      typeof value.lastSeenAt === "string" || value.lastSeenAt === null
+-        ? value.lastSeenAt
+-        : undefined,
+-  };
+-}
+-
+-function normalizeBlueprintCatalogEntry(
+-  value: Partial<KeplerBlueprintCatalogEntry> & { id?: string },
+-): KeplerBlueprintCatalogEntry {
+-  const blueprintId = value.blueprintId ?? value.id;
+-
+-  if (typeof blueprintId !== "string" || blueprintId.length === 0) {
+-    throw new Error("Kepler returned a blueprint without a valid blueprintId.");
+-  }
+-
+-  const displayName =
+-    typeof value.displayName === "string" && value.displayName.length > 0
+-      ? value.displayName
+-      : blueprintId;
+-
+-  return {
+-    id: typeof value.id === "string" ? value.id : undefined,
+-    blueprintId,
+-    displayName,
+-    description: typeof value.description === "string" ? value.description : undefined,
+-    status: typeof value.status === "string" ? value.status : undefined,
+-    output: value.output,
+-    inputs: value.inputs,
+-    productionCost: value.productionCost,
+-    requiredFacility: value.requiredFacility,
+-    buildTicks: typeof value.buildTicks === "number" ? value.buildTicks : undefined,
+-    prerequisites: Array.isArray(value.prerequisites) ? value.prerequisites : undefined,
+-    unlocks: Array.isArray(value.unlocks) ? value.unlocks : undefined,
+-    repeatable: typeof value.repeatable === "boolean" ? value.repeatable : undefined,
+-    level: typeof value.level === "number" || value.level === null ? value.level : undefined,
+-    target: value.target,
+-    facilityLevel: value.facilityLevel,
+-    attachmentPoints: value.attachmentPoints,
+-    attachmentRequirements: Array.isArray(value.attachmentRequirements)
+-      ? value.attachmentRequirements
+-      : undefined,
+-    runtimeAttributes: value.runtimeAttributes,
+-    capabilities: Array.isArray(value.capabilities) ? value.capabilities : undefined,
+-  };
+-}
+-
+-function extractBlueprintEntries(payload: unknown): KeplerBlueprintCatalogEntry[] {
+-  const candidates: unknown[] = Array.isArray(payload)
+-    ? payload
+-    : payload && typeof payload === "object"
+-      ? [
+-          (payload as Record<string, unknown>).blueprints,
+-          (payload as Record<string, unknown>).items,
+-          (payload as Record<string, unknown>).data,
+-        ]
+-      : [];
+-
+-  for (const candidate of candidates) {
+-    if (Array.isArray(candidate)) {
+-      return candidate.map((entry) =>
+-        normalizeBlueprintCatalogEntry(entry as Partial<KeplerBlueprintCatalogEntry> & { id?: string }),
+-      );
+-    }
+-  }
+-
+-  throw new Error("Kepler blueprint catalog response did not include an array of blueprints.");
+-}
+-
+-function normalizeResourceCatalogEntry(
+-  value: Partial<KeplerResourceCatalogEntry> & { id?: string },
+-): KeplerResourceCatalogEntry {
+-  const resourceId = value.resourceId ?? value.id ?? value.name;
+-
+-  if (typeof resourceId !== "string" || resourceId.length === 0) {
+-    throw new Error("Kepler returned a resource without a valid id.");
+-  }
+-
+-  const displayName =
+-    typeof value.displayName === "string" && value.displayName.length > 0
+-      ? value.displayName
+-      : typeof value.name === "string" && value.name.length > 0
+-        ? value.name
+-        : resourceId;
+-
+-  return {
+-    id: typeof value.id === "string" ? value.id : undefined,
+-    resourceId,
+-    displayName,
+-    name: typeof value.name === "string" ? value.name : undefined,
+-    description: typeof value.description === "string" ? value.description : undefined,
+-    status: typeof value.status === "string" ? value.status : undefined,
+-    capabilities: Array.isArray(value.capabilities) ? value.capabilities : undefined,
+-    runtimeAttributes: value.runtimeAttributes,
+-  };
+-}
+-
+-function extractResourceEntries(payload: unknown): KeplerResourceCatalogEntry[] {
+-  const candidates: unknown[] = Array.isArray(payload)
+-    ? payload
+-    : payload && typeof payload === "object"
+-      ? [
+-          (payload as Record<string, unknown>).resources,
+-          (payload as Record<string, unknown>).items,
+-          (payload as Record<string, unknown>).data,
+-        ]
+-      : [];
+-
+-  for (const candidate of candidates) {
+-    if (Array.isArray(candidate)) {
+-      return candidate.map((entry) =>
+-        normalizeResourceCatalogEntry(entry as Partial<KeplerResourceCatalogEntry> & { id?: string }),
+-      );
+-    }
+-  }
+-
+-  throw new Error("Kepler resource catalog response did not include an array of resources.");
+-}
+-
+-export async function fetchKeplerBlueprintCatalog(): Promise<KeplerBlueprintCatalogEntry[]> {
+-  const token = readKeplerToken("habitat blueprint list");
+-
+-  const response = await fetch(`${keplerBaseUrl}/catalog/blueprints`, {
+-    headers: {
+-      Authorization: `Bearer ${token}`,
+-    },
+-  });
++export type { KeplerBlueprintCatalogEntry, KeplerHabitat, KeplerResourceCatalogEntry } from "./kepler/service";
+ 
++async function fetchBackendJson(path: string): Promise<unknown> {
++  const response = await fetch(`${backendBaseUrl}${path}`);
+   if (!response.ok) {
+-    throw new Error(
+-      `Failed to fetch Kepler blueprint catalog: ${response.status} ${response.statusText}.`,
+-    );
++    throw new Error(`Failed to fetch Habitat backend data: ${response.status} ${response.statusText}.`);
+   }
+ 
+-  const payload = (await response.json()) as KeplerBlueprintCatalogResponse;
+-  return extractBlueprintEntries(payload);
++  return response.json();
+ }
+ 
+-export async function fetchKeplerResourceCatalog(): Promise<KeplerResourceCatalogEntry[]> {
+-  const token = readKeplerToken("habitat resource list");
+-
+-  const response = await fetch(`${keplerBaseUrl}/catalog/resources`, {
+-    headers: {
+-      Authorization: `Bearer ${token}`,
+-    },
+-  });
+-
+-  if (!response.ok) {
+-    throw new Error(
+-      `Failed to fetch Kepler resource catalog: ${response.status} ${response.statusText}.`,
+-    );
+-  }
++export async function fetchKeplerBlueprintCatalog(): Promise<
++  import("./kepler/service").KeplerBlueprintCatalogEntry[]
++> {
++  return (await fetchBackendJson("/kepler/blueprints")) as import("./kepler/service").KeplerBlueprintCatalogEntry[];
++}
+ 
+-  const payload = (await response.json()) as KeplerResourceCatalogResponse;
+-  return extractResourceEntries(payload);
++export async function fetchKeplerResourceCatalog(): Promise<
++  import("./kepler/service").KeplerResourceCatalogEntry[]
++> {
++  return (await fetchBackendJson("/kepler/resources")) as import("./kepler/service").KeplerResourceCatalogEntry[];
+ }
+ 
+ export async function fetchKeplerSolarIrradiance(): Promise<number> {
+-  const token = readKeplerToken("habitat tick");
+-
+-  const response = await fetch(`${keplerBaseUrl}/world/solar-irradiance`, {
+-    headers: {
+-      Authorization: `Bearer ${token}`,
+-    },
+-  });
+-
+-  if (!response.ok) {
+-    throw new Error(
+-      `Failed to fetch Kepler solar irradiance: ${response.status} ${response.statusText}.`,
+-    );
+-  }
+-
+-  const payload = (await response.json()) as KeplerSolarIrradianceResponse;
+-  const candidate =
+-    payload && typeof payload === "object" && "solarIrradiance" in payload
+-      ? payload.solarIrradiance?.wPerM2
+-      : payload && typeof payload === "object" && "data" in payload
+-        ? payload.data?.solarIrradiance?.wPerM2
+-        : undefined;
+-
+-  if (typeof candidate !== "number" || !Number.isFinite(candidate)) {
+-    throw new Error("Kepler solar irradiance response did not include a valid numeric irradiance.");
++  const payload = (await fetchBackendJson("/kepler/solar")) as { irradiance?: unknown };
++  if (typeof payload.irradiance !== "number") {
++    throw new Error("Habitat backend did not return a valid solar irradiance value.");
+   }
+-
+-  return candidate;
++  return payload.irradiance;
+ }
+ 
+ export async function fetchKeplerHabitatRegistration(
+   habitatId: string,
+-): Promise<KeplerHabitat> {
+-  const token = readKeplerToken("habitat link --id <habitatId>");
+-  const response = await fetch(
+-    `${keplerBaseUrl}/habitats/${encodeURIComponent(habitatId)}/registration`,
+-    {
+-      headers: {
+-        Authorization: `Bearer ${token}`,
+-      },
+-    },
+-  );
+-
+-  if (!response.ok) {
+-    throw new Error(
+-      `Failed to fetch Kepler habitat '${habitatId}': ${response.status} ${response.statusText}.`,
+-    );
+-  }
+-
+-  const payload = (await response.json()) as KeplerHabitatResponse;
+-
+-  if (!payload.habitat || typeof payload.habitat !== "object") {
+-    throw new Error("Kepler habitat registration response did not include a habitat object.");
+-  }
+-
+-  return normalizeKeplerHabitat(payload.habitat);
++): Promise<import("./kepler/service").KeplerHabitat> {
++  return (await fetchBackendJson(`/kepler/habitats/${encodeURIComponent(habitatId)}/registration`)) as import("./kepler/service").KeplerHabitat;
+ }
+diff --git a/habitat/src/kepler/client.ts b/habitat/src/kepler/client.ts
+new file mode 100644
+index 0000000..402583d
+--- /dev/null
++++ b/habitat/src/kepler/client.ts
+@@ -0,0 +1,26 @@
++const keplerBaseUrl = "https://planet.turingguild.com";
++
++function readKeplerToken(commandHint: string): string {
++  const token = process.env.KEPLER_PLANET_TOKEN;
++
++  if (!token) {
++    throw new Error(`Set KEPLER_PLANET_TOKEN before running '${commandHint}'.`);
++  }
++
++  return token;
++}
++
++export async function fetchKeplerJson(path: string, commandHint: string): Promise<unknown> {
++  const token = readKeplerToken(commandHint);
++  const response = await fetch(`${keplerBaseUrl}${path}`, {
++    headers: {
++      Authorization: `Bearer ${token}`,
++    },
++  });
++
++  if (!response.ok) {
++    throw new Error(`Failed to fetch Kepler data: ${response.status} ${response.statusText}.`);
++  }
++
++  return response.json();
++}
+diff --git a/habitat/src/kepler/service.ts b/habitat/src/kepler/service.ts
+new file mode 100644
+index 0000000..69d5873
+--- /dev/null
++++ b/habitat/src/kepler/service.ts
+@@ -0,0 +1,291 @@
++import { fetchKeplerJson } from "./client";
++
++export type KeplerHabitat = {
++  id: string;
++  habitatSlug: string;
++  displayName: string;
++  catalogVersion: string;
++  status: string;
++  lastSeenAt?: string | null;
++};
++
++type KeplerHabitatResponse = {
++  habitat?: Partial<KeplerHabitat>;
++};
++
++export type KeplerBlueprintCatalogEntry = {
++  id?: string;
++  blueprintId: string;
++  displayName: string;
++  name?: string;
++  description?: string;
++  status?: string;
++  output?: Record<string, unknown>;
++  inputs?: Record<string, unknown>;
++  productionCost?: Record<string, unknown>;
++  requiredFacility?: Record<string, unknown>;
++  buildTicks?: number;
++  prerequisites?: string[];
++  unlocks?: string[];
++  repeatable?: boolean;
++  level?: number | null;
++  target?: Record<string, unknown>;
++  facilityLevel?: Record<string, unknown>;
++  attachmentPoints?: Record<string, unknown>;
++  attachmentRequirements?: Record<string, unknown>[];
++  runtimeAttributes?: Record<string, unknown>;
++  capabilities?: string[];
++};
++
++type KeplerBlueprintCatalogResponse =
++  | KeplerBlueprintCatalogEntry[]
++  | {
++      blueprints?: unknown;
++      items?: unknown;
++      data?: unknown;
++    };
++
++export type KeplerResourceCatalogEntry = {
++  id?: string;
++  resourceId?: string;
++  displayName?: string;
++  name?: string;
++  description?: string;
++  status?: string;
++  capabilities?: string[];
++  runtimeAttributes?: Record<string, unknown>;
++};
++
++type KeplerResourceCatalogResponse =
++  | KeplerResourceCatalogEntry[]
++  | {
++      resources?: unknown;
++      items?: unknown;
++      data?: unknown;
++    };
++
++type KeplerSolarIrradianceResponse =
++  | {
++      solarIrradiance?: {
++        wPerM2?: unknown;
++        condition?: unknown;
++      };
++    }
++  | {
++      data?: {
++        solarIrradiance?: {
++          wPerM2?: unknown;
++          condition?: unknown;
++        };
++      };
++    };
++
++function normalizeKeplerHabitat(value: Partial<KeplerHabitat>): KeplerHabitat {
++  if (typeof value.id !== "string" || value.id.length === 0) {
++    throw new Error("Kepler returned a habitat without a valid id.");
++  }
++
++  if (typeof value.habitatSlug !== "string" || value.habitatSlug.length === 0) {
++    throw new Error("Kepler returned a habitat without a valid habitatSlug.");
++  }
++
++  if (typeof value.displayName !== "string" || value.displayName.length === 0) {
++    throw new Error("Kepler returned a habitat without a valid displayName.");
++  }
++
++  if (typeof value.catalogVersion !== "string" || value.catalogVersion.length === 0) {
++    throw new Error("Kepler returned a habitat without a valid catalogVersion.");
++  }
++
++  if (typeof value.status !== "string" || value.status.length === 0) {
++    throw new Error("Kepler returned a habitat without a valid status.");
++  }
++
++  return {
++    id: value.id,
++    habitatSlug: value.habitatSlug,
++    displayName: value.displayName,
++    catalogVersion: value.catalogVersion,
++    status: value.status,
++    lastSeenAt:
++      typeof value.lastSeenAt === "string" || value.lastSeenAt === null
++        ? value.lastSeenAt
++        : undefined,
++  };
++}
++
++export function normalizeKeplerCatalog(
++  entries: Array<Partial<KeplerBlueprintCatalogEntry> & { id?: string }>,
++): KeplerBlueprintCatalogEntry[] {
++  return entries.map((entry) => {
++    const blueprintId = entry.blueprintId ?? entry.id;
++
++    if (typeof blueprintId !== "string" || blueprintId.length === 0) {
++      throw new Error("Kepler returned a blueprint without a valid blueprintId.");
++    }
++
++    const displayName =
++      typeof entry.displayName === "string" && entry.displayName.length > 0
++        ? entry.displayName
++        : typeof entry.name === "string" && entry.name.length > 0
++          ? entry.name
++        : blueprintId;
++
++    return {
++      id: typeof entry.id === "string" ? entry.id : undefined,
++      blueprintId,
++      displayName,
++      name: typeof entry.name === "string" && entry.name.length > 0 ? entry.name : displayName,
++      description: typeof entry.description === "string" ? entry.description : undefined,
++      status: typeof entry.status === "string" ? entry.status : undefined,
++      output: entry.output,
++      inputs: entry.inputs,
++      productionCost: entry.productionCost,
++      requiredFacility: entry.requiredFacility,
++      buildTicks: typeof entry.buildTicks === "number" ? entry.buildTicks : undefined,
++      prerequisites: Array.isArray(entry.prerequisites) ? entry.prerequisites : undefined,
++      unlocks: Array.isArray(entry.unlocks) ? entry.unlocks : undefined,
++      repeatable: typeof entry.repeatable === "boolean" ? entry.repeatable : undefined,
++      level: typeof entry.level === "number" || entry.level === null ? entry.level : undefined,
++      target: entry.target,
++      facilityLevel: entry.facilityLevel,
++      attachmentPoints: entry.attachmentPoints,
++      attachmentRequirements: Array.isArray(entry.attachmentRequirements)
++        ? entry.attachmentRequirements
++        : undefined,
++      runtimeAttributes: entry.runtimeAttributes,
++      capabilities: Array.isArray(entry.capabilities) ? entry.capabilities : undefined,
++    };
++  });
++}
++
++function extractBlueprintEntries(payload: unknown): KeplerBlueprintCatalogEntry[] {
++  const candidates: unknown[] = Array.isArray(payload)
++    ? payload
++    : payload && typeof payload === "object"
++      ? [
++          (payload as Record<string, unknown>).blueprints,
++          (payload as Record<string, unknown>).items,
++          (payload as Record<string, unknown>).data,
++        ]
++      : [];
++
++  for (const candidate of candidates) {
++    if (Array.isArray(candidate)) {
++      return normalizeKeplerCatalog(
++        candidate as Array<Partial<KeplerBlueprintCatalogEntry> & { id?: string }>,
++      );
++    }
++  }
++
++  throw new Error("Kepler blueprint catalog response did not include an array of blueprints.");
++}
++
++function normalizeResourceCatalogEntry(
++  value: Partial<KeplerResourceCatalogEntry> & { id?: string },
++): KeplerResourceCatalogEntry {
++  const resourceId = value.resourceId ?? value.id ?? value.name;
++
++  if (typeof resourceId !== "string" || resourceId.length === 0) {
++    throw new Error("Kepler returned a resource without a valid id.");
++  }
++
++  const displayName =
++    typeof value.displayName === "string" && value.displayName.length > 0
++      ? value.displayName
++      : typeof value.name === "string" && value.name.length > 0
++        ? value.name
++        : resourceId;
++
++  return {
++    id: typeof value.id === "string" ? value.id : undefined,
++    resourceId,
++    displayName,
++    name: typeof value.name === "string" ? value.name : undefined,
++    description: typeof value.description === "string" ? value.description : undefined,
++    status: typeof value.status === "string" ? value.status : undefined,
++    capabilities: Array.isArray(value.capabilities) ? value.capabilities : undefined,
++    runtimeAttributes: value.runtimeAttributes,
++  };
++}
++
++function extractResourceEntries(payload: unknown): KeplerResourceCatalogEntry[] {
++  const candidates: unknown[] = Array.isArray(payload)
++    ? payload
++    : payload && typeof payload === "object"
++      ? [
++          (payload as Record<string, unknown>).resources,
++          (payload as Record<string, unknown>).items,
++          (payload as Record<string, unknown>).data,
++        ]
++      : [];
++
++  for (const candidate of candidates) {
++    if (Array.isArray(candidate)) {
++      return candidate.map((entry) =>
++        normalizeResourceCatalogEntry(entry as Partial<KeplerResourceCatalogEntry> & { id?: string }),
++      );
++    }
++  }
++
++  throw new Error("Kepler resource catalog response did not include an array of resources.");
++}
++
++function extractSolarIrradiance(payload: KeplerSolarIrradianceResponse): number {
++  const candidate =
++    payload && typeof payload === "object" && "solarIrradiance" in payload
++      ? payload.solarIrradiance?.wPerM2
++      : payload && typeof payload === "object" && "data" in payload
++        ? payload.data?.solarIrradiance?.wPerM2
++        : undefined;
++
++  if (typeof candidate !== "number" || !Number.isFinite(candidate)) {
++    throw new Error("Kepler solar irradiance response did not include a valid numeric irradiance.");
++  }
++
++  return candidate;
++}
++
++export function normalizeKeplerHabitatRegistration(
++  habitat: Partial<KeplerHabitat>,
++): KeplerHabitat {
++  return normalizeKeplerHabitat(habitat);
++}
++
++export async function fetchKeplerBlueprintCatalog(): Promise<KeplerBlueprintCatalogEntry[]> {
++  const payload = (await fetchKeplerJson(
++    "/catalog/blueprints",
++    "habitat blueprint list",
++  )) as KeplerBlueprintCatalogResponse;
++  return extractBlueprintEntries(payload);
++}
++
++export async function fetchKeplerResourceCatalog(): Promise<KeplerResourceCatalogEntry[]> {
++  const payload = (await fetchKeplerJson(
++    "/catalog/resources",
++    "habitat resource list",
++  )) as KeplerResourceCatalogResponse;
++  return extractResourceEntries(payload);
++}
++
++export async function fetchKeplerSolarIrradiance(): Promise<number> {
++  const payload = (await fetchKeplerJson("/world/solar-irradiance", "habitat tick")) as KeplerSolarIrradianceResponse;
++  return extractSolarIrradiance(payload);
++}
++
++export async function fetchKeplerHabitatRegistration(habitatId: string): Promise<KeplerHabitat> {
++  const payload = (await fetchKeplerJson(
++    `/habitats/${encodeURIComponent(habitatId)}/registration`,
++    "habitat link --id <habitatId>",
++  )) as KeplerHabitatResponse;
++
++  if (!payload.habitat || typeof payload.habitat !== "object") {
++    throw new Error("Kepler habitat registration response did not include a habitat object.");
++  }
++
++  return normalizeKeplerHabitat(payload.habitat);
++}
++
++export async function refreshKeplerBlueprintCatalog(): Promise<KeplerBlueprintCatalogEntry[]> {
++  return fetchKeplerBlueprintCatalog();
++}
+diff --git a/habitat/src/server/routes.ts b/habitat/src/server/routes.ts
+new file mode 100644
+index 0000000..8dabd71
+--- /dev/null
++++ b/habitat/src/server/routes.ts
+@@ -0,0 +1,27 @@
++import { Hono } from "hono";
++import { registerHealthRoute } from "./health";
++import { createStateService, type StateService } from "../state/service";
++import {
++  fetchKeplerBlueprintCatalog,
++  fetchKeplerHabitatRegistration,
++  fetchKeplerResourceCatalog,
++  fetchKeplerSolarIrradiance,
++} from "../kepler/service";
++
++const defaultStateService = createStateService({ storagePath: ".habitat/habitat.sqlite" });
++
++export function createApp(stateService: StateService = defaultStateService): Hono {
++  const app = new Hono();
++  registerHealthRoute(app);
++  app.get("/state", async (c) => c.json(await stateService.getState()));
++  app.post("/state", async (c) => c.json(await stateService.saveState(await c.req.json())));
++  app.delete("/state", async (c) => c.json(await stateService.resetState()));
++  app.get("/kepler/blueprints", async (c) => c.json(await fetchKeplerBlueprintCatalog()));
++  app.get("/kepler/resources", async (c) => c.json(await fetchKeplerResourceCatalog()));
++  app.get("/kepler/solar", async (c) => c.json({ irradiance: await fetchKeplerSolarIrradiance() }));
++  app.get("/kepler/habitats/:habitatId/registration", async (c) => {
++    const habitatId = c.req.param("habitatId");
++    return c.json(await fetchKeplerHabitatRegistration(habitatId));
++  });
++  return app;
++}
+diff --git a/habitat/test/kepler-service.test.ts b/habitat/test/kepler-service.test.ts
+new file mode 100644
+index 0000000..c0d14f4
+--- /dev/null
++++ b/habitat/test/kepler-service.test.ts
+@@ -0,0 +1,12 @@
++import { describe, expect, test } from "bun:test";
++import { normalizeKeplerCatalog } from "../src/kepler/service";
++
++describe("kepler service", () => {
++  test("normalizes blueprint catalog entries", () => {
++    const catalog = normalizeKeplerCatalog([
++      { id: "bp-1", name: "Starter", buildable: true } as never,
++    ]);
++    expect(catalog[0].id).toBe("bp-1");
++    expect(catalog[0].name).toBe("Starter");
++  });
++});

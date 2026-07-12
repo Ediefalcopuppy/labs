@@ -1,0 +1,92 @@
+COMMITS
+7202b33 feat: add backend server shell
+
+STAT
+ habitat/.superpowers/sdd/task-1-report.md | 20 ++++++++++++++++++++
+ habitat/bun.lock                          |  3 +++
+ habitat/package.json                      |  6 ++++--
+ habitat/src/server.ts                     | 17 +++++++++++++++++
+ habitat/src/server/health.ts              |  5 +++++
+ habitat/src/server/routes.ts              |  8 ++++++++
+ habitat/test/server.test.ts               | 11 +++++++++++
+ 7 files changed, 68 insertions(+), 2 deletions(-)
+
+DIFF
+diff --git a/habitat/bun.lock b/habitat/bun.lock
+index 7d3cabc..f58b69c 100644
+--- a/habitat/bun.lock
++++ b/habitat/bun.lock
+@@ -1,29 +1,32 @@
+ {
+   "lockfileVersion": 1,
+   "configVersion": 1,
+   "workspaces": {
+     "": {
+       "name": "habitat",
+       "dependencies": {
+         "commander": "^14.0.0",
++        "hono": "^4.6.10",
+       },
+       "devDependencies": {
+         "@types/bun": "^1.2.0",
+         "typescript": "^5.8.0",
+       },
+     },
+   },
+   "packages": {
+     "@types/bun": ["@types/bun@1.3.14", "", { "dependencies": { "bun-types": "1.3.14" } }, "sha512-h1hFqFVcvAvD9j9K7ZW7vd82aSA+rTdznZa+5bwvCwqSB1jmmfLcbIWhOLx1/+boy/xmjgCs/OMUL8hRJSmnPw=="],
+ 
+     "@types/node": ["@types/node@26.1.0", "", { "dependencies": { "undici-types": "~8.3.0" } }, "sha512-O0A1G3xPGy4w7AgQdAQYUlQ+BKk2Oovw8eRpofyp5KdBZULnbe+WqaOVNrm705SHphCiG4XHsACrSmPu1f+Kgw=="],
+ 
+     "bun-types": ["bun-types@1.3.14", "", { "dependencies": { "@types/node": "*" } }, "sha512-4N0ig0fEomHt5R0KCFWjovxow98rIoRwKolrYdCcknNwMekCXRnWEUvgu5soYV8QXtVsrUD8B95MBOZGPvr6KQ=="],
+ 
+     "commander": ["commander@14.0.3", "", {}, "sha512-H+y0Jo/T1RZ9qPP4Eh1pkcQcLRglraJaSLoyOtHxu6AapkjWVCy2Sit1QQ4x3Dng8qDlSsZEet7g5Pq06MvTgw=="],
+ 
++    "hono": ["hono@4.12.29", "", {}, "sha512-1hNiRjawYrLq/4m3DQQjPGFg0VZkk4RjQJDff/excI6Dm9BiL75qxGrd7/c6YOxPdq6AscP3LiXhQ6fKFC1Waw=="],
++
+     "typescript": ["typescript@5.9.3", "", { "bin": { "tsc": "bin/tsc", "tsserver": "bin/tsserver" } }, "sha512-jl1vZzPDinLr9eUt3J/t7V6FgNEw9QjvBPdysz9KfQDD41fQrC2Y4vKQdiaUpFT4bXlb1RHhLpp8wtm6M5TgSw=="],
+ 
+     "undici-types": ["undici-types@8.3.0", "", {}, "sha512-j375ScV60dom+YkPFIfTLcOiPxkN/buHz5GobjLhixFuANaNs3C9l4GmrWqejgXWJ7BbJcFYpTEUkS1Ge8bpZQ=="],
+   }
+ }
+diff --git a/habitat/package.json b/habitat/package.json
+index f89a2e3..30084f5 100644
+--- a/habitat/package.json
++++ b/habitat/package.json
+@@ -1,18 +1,20 @@
+ {
+   "name": "habitat",
+   "version": "0.1.0",
+   "type": "module",
+   "bin": {
+     "habitat": "./src/index.ts"
+   },
+   "scripts": {
+-    "check": "tsc --noEmit"
++    "check": "tsc --noEmit",
++    "server": "bun run src/server.ts"
+   },
+   "dependencies": {
+-    "commander": "^14.0.0"
++    "commander": "^14.0.0",
++    "hono": "^4.6.10"
+   },
+   "devDependencies": {
+     "@types/bun": "^1.2.0",
+     "typescript": "^5.8.0"
+   }
+ }
+diff --git a/habitat/src/server/routes.ts b/habitat/src/server/routes.ts
+new file mode 100644
+index 0000000..facbb17
+--- /dev/null
++++ b/habitat/src/server/routes.ts
+@@ -0,0 +1,8 @@
++import { Hono } from "hono";
++import { registerHealthRoute } from "./health";
++
++export function createApp(): Hono {
++  const app = new Hono();
++  registerHealthRoute(app);
++  return app;
++}

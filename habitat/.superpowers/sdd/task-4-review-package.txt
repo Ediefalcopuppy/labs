@@ -1,0 +1,1113 @@
+COMMITS
+7202b33 feat: add backend server shell
+9e75b63 feat: move kepler access behind backend
+2b33f98 fix: restore habitat tick semantics
+
+STAT
+ habitat/.superpowers/sdd/task-1-report.md |  20 ++
+ habitat/.superpowers/sdd/task-3-report.md |  20 ++
+ habitat/.superpowers/sdd/task-4-report.md |  26 ++
+ habitat/bun.lock                          |   3 +
+ habitat/package.json                      |   6 +-
+ habitat/src/construction.ts               |   2 +-
+ habitat/src/domain/commands.ts            | 106 ++++++
+ habitat/src/domain/construction.ts        | 513 ++++++++++++++++++++++++++++++
+ habitat/src/domain/power.ts               | 217 +++++++++++++
+ habitat/src/kepler-client.ts              | 336 ++-----------------
+ habitat/src/kepler/client.ts              |  26 ++
+ habitat/src/kepler/service.ts             | 291 +++++++++++++++++
+ habitat/src/server.ts                     |  17 +
+ habitat/src/server/health.ts              |   5 +
+ habitat/src/server/routes.ts              |  27 ++
+ habitat/test/domain-commands.test.ts      | 193 +++++++++++
+ habitat/test/kepler-service.test.ts       |  12 +
+ habitat/test/server.test.ts               |  11 +
+ 18 files changed, 1513 insertions(+), 318 deletions(-)
+
+DIFF
+diff --git a/habitat/src/domain/commands.ts b/habitat/src/domain/commands.ts
+new file mode 100644
+index 0000000..02d5afa
+--- /dev/null
++++ b/habitat/src/domain/commands.ts
+@@ -0,0 +1,106 @@
++import { randomUUID } from "node:crypto";
++import type { StateService } from "../state/service";
++import { fetchKeplerBlueprintCatalog, fetchKeplerSolarIrradiance } from "../kepler/service";
++import { spendInventoryMaterials } from "./inventory";
++import { planConstructionStart, previewConstructionStart, advanceConstructionTick } from "./construction";
++import { setModuleStatus } from "./modules";
++
++export async function runConstructCommand(params: {
++  stateService: StateService;
++  blueprintId: string;
++  displayName?: string;
++  moduleName?: string;
++  dryRun?: boolean;
++  getBlueprints?: typeof fetchKeplerBlueprintCatalog;
++}): Promise<unknown> {
++  const data = await params.stateService.getState();
++  const getBlueprints = params.getBlueprints ?? fetchKeplerBlueprintCatalog;
++  const blueprints = await getBlueprints();
++  const blueprint = blueprints.find(
++    (candidate) => candidate.blueprintId === params.blueprintId || candidate.id === params.blueprintId,
++  );
++
++  if (!blueprint) {
++    throw new Error(`No blueprint with id '${params.blueprintId}' exists in Kepler.`);
++  }
++
++  const report = previewConstructionStart({
++    blueprint,
++    habitat: data,
++    displayName: params.displayName ?? blueprint.displayName,
++    moduleName: params.moduleName,
++  });
++
++  if (params.dryRun) {
++    return report;
++  }
++
++  const plan = planConstructionStart({
++    blueprint,
++    habitat: data,
++    displayName: params.displayName ?? blueprint.displayName,
++    moduleName: params.moduleName,
++  });
++
++  data.blueprints = blueprints;
++  data.inventory = spendInventoryMaterials(data.inventory, plan.consumedMaterials);
++  data.constructionJobs.push({
++    id: `construction_${randomUUID()}`,
++    moduleName: plan.moduleName,
++    blueprintId: blueprint.blueprintId,
++    facilityModuleId: plan.facility.id,
++    facilityModuleName: plan.facility.displayName,
++    totalBuildTicks: plan.totalBuildTicks,
++    remainingBuildTicks: plan.totalBuildTicks,
++    consumedMaterials: plan.consumedMaterials,
++    runtimeAttributes: plan.runtimeAttributes,
++    capabilities: plan.capabilities,
++  });
++  await params.stateService.saveState(data);
++  return { message: `Started construction for '${plan.displayName}' from blueprint '${blueprint.blueprintId}' using facility '${plan.facility.displayName}'.` };
++}
++
++export async function runInventorySetCommand(params: { stateService: StateService; resourceId: string; amount: number }) {
++  const data = await params.stateService.getState();
++  data.inventory[params.resourceId] = params.amount;
++  await params.stateService.saveState(data);
++  return data.inventory;
++}
++
++export async function runModuleSetStatusCommand(params: {
++  stateService: StateService;
++  moduleId: string;
++  status: string;
++}) {
++  const data = await params.stateService.getState();
++  const module = data.modules.find((candidate) => candidate.id === params.moduleId);
++  if (!module) {
++    throw new Error(`No module with id '${params.moduleId}' exists.`);
++  }
++  Object.assign(module, setModuleStatus(module, params.status));
++  await params.stateService.saveState(data);
++  return module;
++}
++
++export async function runTickCommand(params: {
++  stateService: StateService;
++  count: number;
++  getIrradiance?: () => Promise<number>;
++}) {
++  const data = await params.stateService.getState();
++  const completedJobs: string[] = [];
++  let advancedConstructionTicks = 0;
++  let pausedConstructionTicks = 0;
++  let energyCost = 0;
++  const getIrradiance = params.getIrradiance ?? fetchKeplerSolarIrradiance;
++  for (let step = 0; step < params.count; step += 1) {
++    const irradiance = await getIrradiance();
++    const result = advanceConstructionTick(data, irradiance);
++    energyCost += result.energyCost;
++    advancedConstructionTicks += result.advancedConstructionTicks;
++    pausedConstructionTicks += result.pausedConstructionTicks;
++    completedJobs.push(...result.completedJobs);
++  }
++  await params.stateService.saveState(data);
++  return { completedJobs, advancedConstructionTicks, pausedConstructionTicks, energyCost, data };
++}
+diff --git a/habitat/src/domain/construction.ts b/habitat/src/domain/construction.ts
+new file mode 100644
+index 0000000..1b8e636
+--- /dev/null
++++ b/habitat/src/domain/construction.ts
+@@ -0,0 +1,513 @@
++import type { KeplerBlueprintCatalogEntry } from "../kepler/service";
++import { canSpendInventory, spendInventoryMaterials } from "./inventory";
++import type { HabitatModule } from "./modules";
++import {
++  BATTERY_MAX_CHARGE,
++  applySolarChargeToBattery,
++  chargerChargeRate,
++  computeBatteryChargeAfterTick,
++  batteryRemainingCapacity,
++  moduleCurrentPowerDraw,
++  moduleCurrentState,
++  solarGeneratedChargePerTick,
++  spendConstructionPower,
++} from "./power";
++import { createUniqueModuleName } from "./modules";
++
++export type ConstructionJobDraft = {
++  id: string;
++  moduleName: string;
++  blueprintId: string;
++  facilityModuleId: string;
++  facilityModuleName: string;
++  totalBuildTicks: number;
++  remainingBuildTicks: number;
++  consumedMaterials: Record<string, number>;
++  runtimeAttributes: Record<string, unknown>;
++  capabilities: string[];
++};
++
++export type ConstructionHabitatState = {
++  modules: HabitatModule[];
++  inventory: Record<string, number>;
++  constructionJobs: Array<{ facilityModuleId: string }>;
++  power: { powerConsumedTicks: number };
++};
++
++function moduleLevel(module: HabitatModule): number {
++  const explicitLevel = module.runtimeAttributes.level ?? module.runtimeAttributes.blueprintLevel;
++  return typeof explicitLevel === "number" && Number.isFinite(explicitLevel) ? explicitLevel : 1;
++}
++
++function moduleOutputType(module: HabitatModule): string | undefined {
++  const moduleType = module.runtimeAttributes.moduleType;
++  return typeof moduleType === "string" && moduleType.length > 0 ? moduleType : undefined;
++}
++
++function isModuleAvailable(module: HabitatModule): boolean {
++  const state = module.runtimeAttributes.state ?? module.runtimeAttributes.status;
++  return state === "online" || state === "idle" || state === "active";
++}
++
++function isBatteryModule(module: HabitatModule): boolean {
++  const runtimeEnergyStorage = module.runtimeAttributes.energyStorageKwh;
++  const outputType = moduleOutputType(module);
++
++  return (
++    module.runtimeAttributes.isBattery === true ||
++    module.capabilities.includes("isBattery") ||
++    module.blueprintId === "battery-bank" ||
++    outputType === "battery-bank" ||
++    (typeof runtimeEnergyStorage === "number" && Number.isFinite(runtimeEnergyStorage) && runtimeEnergyStorage > 0) ||
++    module.blueprintId.toLowerCase().includes("battery") ||
++    (typeof outputType === "string" && outputType.toLowerCase().includes("battery"))
++  );
++}
++
++function isChargerModule(module: HabitatModule): boolean {
++  return module.runtimeAttributes.isCharger === true || module.capabilities.includes("isCharger");
++}
++
++function hasLocalPrerequisite(state: ConstructionHabitatState, prerequisite: string): boolean {
++  return state.modules.some(
++    (module) =>
++      module.blueprintId === prerequisite ||
++      moduleOutputType(module) === prerequisite ||
++      module.capabilities.includes(prerequisite),
++  );
++}
++
++function hasUsablePower(state: ConstructionHabitatState): boolean {
++  return state.modules.some((module) => {
++    if (!isModuleAvailable(module)) {
++      return false;
++    }
++
++    if (module.runtimeAttributes.isCharger === true || module.capabilities.includes("isCharger")) {
++      return true;
++    }
++
++    if (isBatteryModule(module)) {
++      const charge = module.runtimeAttributes.charge;
++      return typeof charge === "number" && Number.isFinite(charge) ? charge > 0 : true;
++    }
++
++    return false;
++  });
++}
++
++function normalizeMaterials(blueprint: KeplerBlueprintCatalogEntry): Record<string, number> {
++  if (!blueprint.inputs || typeof blueprint.inputs !== "object") {
++    return {};
++  }
++
++  return Object.fromEntries(
++    Object.entries(blueprint.inputs).filter(
++      ([resourceId, amount]) =>
++        typeof resourceId === "string" &&
++        typeof amount === "number" &&
++        Number.isFinite(amount) &&
++        amount > 0,
++    ),
++  ) as Record<string, number>;
++}
++
++function facilityMatches(module: HabitatModule, requiredFacility: Record<string, unknown>, minimumLevel: number): boolean {
++  const moduleType = requiredFacility.moduleType;
++  if (typeof moduleType !== "string" || moduleType.length === 0) {
++    return false;
++  }
++
++  return (
++    (module.blueprintId === moduleType || moduleOutputType(module) === moduleType) &&
++    isModuleAvailable(module) &&
++    moduleLevel(module) >= minimumLevel
++  );
++}
++
++function isFacilityBusy(state: ConstructionHabitatState, moduleId: string): boolean {
++  return state.constructionJobs.some((job) => job.facilityModuleId === moduleId);
++}
++
++function validateBuildableBlueprint(blueprint: KeplerBlueprintCatalogEntry): void {
++  if (blueprint.status !== "published") {
++    throw new Error(`Blueprint '${blueprint.blueprintId}' must be published before construction can start.`);
++  }
++
++  if (!blueprint.output || typeof blueprint.output !== "object") {
++    throw new Error(`Blueprint '${blueprint.blueprintId}' does not describe a buildable output.`);
++  }
++
++  const itemType = (blueprint.output as Record<string, unknown>).itemType;
++  if (itemType !== "module") {
++    throw new Error(`Blueprint '${blueprint.blueprintId}' does not describe something buildable.`);
++  }
++
++  if (typeof blueprint.buildTicks !== "number" || !Number.isFinite(blueprint.buildTicks) || blueprint.buildTicks <= 0) {
++    throw new Error(`Blueprint '${blueprint.blueprintId}' does not define a valid build time.`);
++  }
++}
++
++function chooseFacility(state: ConstructionHabitatState, blueprint: KeplerBlueprintCatalogEntry): HabitatModule {
++  const requiredFacility = blueprint.requiredFacility;
++  if (!requiredFacility || typeof requiredFacility !== "object") {
++    throw new Error(`Blueprint '${blueprint.blueprintId}' does not define a required construction facility.`);
++  }
++
++  const minimumLevel =
++    typeof requiredFacility.minimumLevel === "number" && Number.isFinite(requiredFacility.minimumLevel)
++      ? requiredFacility.minimumLevel
++      : 1;
++
++  const facility = state.modules.find(
++    (module) => facilityMatches(module, requiredFacility, minimumLevel) && !isFacilityBusy(state, module.id),
++  );
++
++  if (!facility) {
++    throw new Error(`No required construction facility is online and available for '${blueprint.blueprintId}'.`);
++  }
++
++  return facility;
++}
++
++export function planConstructionStart(input: {
++  blueprint: KeplerBlueprintCatalogEntry;
++  habitat: ConstructionHabitatState;
++  displayName?: string;
++  moduleName?: string;
++}): {
++  blueprint: KeplerBlueprintCatalogEntry;
++  name: string;
++  moduleName: string;
++  displayName: string;
++  facility: HabitatModule;
++  consumedMaterials: Record<string, number>;
++  totalBuildTicks: number;
++  runtimeAttributes: Record<string, unknown>;
++  capabilities: string[];
++} {
++  validateBuildableBlueprint(input.blueprint);
++  const totalBuildTicks = input.blueprint.buildTicks as number;
++
++  if (Array.isArray(input.blueprint.prerequisites)) {
++    const missingPrerequisite = input.blueprint.prerequisites.find(
++      (prerequisite) => !hasLocalPrerequisite(input.habitat, prerequisite),
++    );
++
++    if (missingPrerequisite) {
++      throw new Error(`Missing prerequisite '${missingPrerequisite}' for '${input.blueprint.blueprintId}'.`);
++    }
++  }
++
++  const requiredMaterials = normalizeMaterials(input.blueprint);
++  if (!canSpendInventory(input.habitat.inventory, requiredMaterials)) {
++    throw new Error(`Local inventory does not contain the required materials for '${input.blueprint.blueprintId}'.`);
++  }
++
++  const supplyModuleExists = input.habitat.modules.some(
++    (module) =>
++      isModuleAvailable(module) &&
++      (module.blueprintId === "supply-cache" ||
++        moduleOutputType(module) === "supply-cache" ||
++        module.capabilities.includes("logistics")),
++  );
++
++  if (!supplyModuleExists) {
++    throw new Error("Construction requires an online supply cache or logistics module.");
++  }
++
++  if (!hasUsablePower(input.habitat)) {
++    throw new Error("Construction requires usable habitat power.");
++  }
++
++  const facility = chooseFacility(input.habitat, input.blueprint);
++  const displayName = input.displayName ?? input.blueprint.displayName ?? input.blueprint.blueprintId;
++  const name = createUniqueModuleName(input.moduleName ?? displayName, input.habitat.modules.map((module) => module.name));
++
++  return {
++    blueprint: input.blueprint,
++    name,
++    moduleName: input.moduleName ?? displayName,
++    displayName,
++    facility,
++    consumedMaterials: requiredMaterials,
++    totalBuildTicks,
++    runtimeAttributes: {
++      ...(input.blueprint.runtimeAttributes ?? {}),
++      ...(typeof input.blueprint.level === "number" && Number.isFinite(input.blueprint.level)
++        ? { blueprintLevel: input.blueprint.level }
++        : {}),
++      ...(typeof input.blueprint.output?.level === "number" && Number.isFinite(input.blueprint.output.level)
++        ? { level: input.blueprint.output.level }
++        : {}),
++      ...(typeof input.blueprint.output?.moduleType === "string" && input.blueprint.output.moduleType.length > 0
++        ? { moduleType: input.blueprint.output.moduleType }
++        : {}),
++      ...(input.blueprint.runtimeAttributes?.isBattery === true || input.blueprint.capabilities?.includes("isBattery")
++        ? { charge: 100 }
++        : {}),
++    },
++    capabilities: [...(input.blueprint.capabilities ?? [])],
++  };
++}
++
++export function previewConstructionStart(input: {
++  blueprint: KeplerBlueprintCatalogEntry;
++  habitat: ConstructionHabitatState;
++  displayName?: string;
++  moduleName?: string;
++}): {
++  requiredFacilityExists: boolean;
++  fabricatorAvailable: boolean;
++  supplyCacheOnline: boolean;
++  prerequisitesMet: boolean;
++  inventoryHasMaterials: boolean;
++  moduleToBeCreated: string;
++  resourcesToBeSpent: Record<string, number>;
++  canStart: boolean;
++} {
++  validateBuildableBlueprint(input.blueprint);
++  const requiredFacility = input.blueprint.requiredFacility;
++  const minimumLevel =
++    requiredFacility && typeof requiredFacility === "object" &&
++    typeof requiredFacility.minimumLevel === "number" &&
++    Number.isFinite(requiredFacility.minimumLevel)
++      ? requiredFacility.minimumLevel
++      : 1;
++  const facilityExists =
++    !!requiredFacility &&
++    typeof requiredFacility === "object" &&
++    input.habitat.modules.some((module) => facilityMatches(module, requiredFacility as Record<string, unknown>, minimumLevel));
++  const fabricatorAvailable =
++    !!requiredFacility &&
++    typeof requiredFacility === "object" &&
++    input.habitat.modules.some(
++      (module) =>
++        facilityMatches(module, requiredFacility as Record<string, unknown>, minimumLevel) &&
++        !isFacilityBusy(input.habitat, module.id),
++    );
++  const supplyCacheOnline = input.habitat.modules.some(
++    (module) =>
++      isModuleAvailable(module) &&
++      (module.blueprintId === "supply-cache" ||
++        moduleOutputType(module) === "supply-cache" ||
++        module.capabilities.includes("logistics")),
++  );
++  const prerequisitesMet = !Array.isArray(input.blueprint.prerequisites)
++    ? true
++    : !input.blueprint.prerequisites.find(
++        (prerequisite) => !hasLocalPrerequisite(input.habitat, prerequisite),
++      );
++  const resourcesToBeSpent = normalizeMaterials(input.blueprint);
++  const inventoryHasMaterials = canSpendInventory(input.habitat.inventory, resourcesToBeSpent);
++  const moduleToBeCreated = input.moduleName ?? input.blueprint.displayName ?? input.blueprint.blueprintId;
++  const canStart =
++    facilityExists &&
++    fabricatorAvailable &&
++    supplyCacheOnline &&
++    prerequisitesMet &&
++    inventoryHasMaterials &&
++    hasUsablePower(input.habitat);
++
++  return {
++    requiredFacilityExists: facilityExists,
++    fabricatorAvailable,
++    supplyCacheOnline,
++    prerequisitesMet,
++    inventoryHasMaterials,
++    moduleToBeCreated,
++    resourcesToBeSpent,
++    canStart,
++  };
++}
++
++export function forceConstructionStart(input: {
++  blueprint: KeplerBlueprintCatalogEntry;
++  habitat: ConstructionHabitatState;
++  displayName?: string;
++  moduleName?: string;
++}): {
++  name: string;
++  moduleName: string;
++  displayName: string;
++  blueprintId: string;
++  facilityModuleId: string;
++  facilityModuleName: string;
++  consumedMaterials: Record<string, number>;
++  runtimeAttributes: Record<string, unknown>;
++  capabilities: string[];
++  totalBuildTicks: number;
++} {
++  validateBuildableBlueprint(input.blueprint);
++  const totalBuildTicks = input.blueprint.buildTicks as number;
++  const requiredMaterials = normalizeMaterials(input.blueprint);
++  const facility =
++    input.habitat.modules.find((module) => isModuleAvailable(module)) ??
++    ({
++      id: "debug-forced-facility",
++      name: "debug-forced-facility",
++      blueprintId: "debug-forced-facility",
++      displayName: "Debug Forced Facility",
++      connectedTo: [],
++      runtimeAttributes: { state: "online" },
++      capabilities: [],
++    } as HabitatModule);
++  const displayName = input.displayName ?? input.blueprint.displayName ?? input.blueprint.blueprintId;
++
++  return {
++    name: createUniqueModuleName(input.moduleName ?? displayName, input.habitat.modules.map((module) => module.name)),
++    moduleName: input.moduleName ?? displayName,
++    displayName,
++    blueprintId: input.blueprint.blueprintId,
++    facilityModuleId: facility.id,
++    facilityModuleName: facility.displayName,
++    consumedMaterials: requiredMaterials,
++    runtimeAttributes: {
++      ...(input.blueprint.runtimeAttributes ?? {}),
++      ...(typeof input.blueprint.level === "number" && Number.isFinite(input.blueprint.level)
++        ? { blueprintLevel: input.blueprint.level }
++        : {}),
++      ...(typeof input.blueprint.output?.level === "number" && Number.isFinite(input.blueprint.output.level)
++        ? { level: input.blueprint.output.level }
++        : {}),
++      ...(typeof input.blueprint.output?.moduleType === "string" && input.blueprint.output.moduleType.length > 0
++        ? { moduleType: input.blueprint.output.moduleType }
++        : {}),
++      ...(input.blueprint.runtimeAttributes?.isBattery === true || input.blueprint.capabilities?.includes("isBattery")
++        ? { charge: 100 }
++        : {}),
++      state: "online",
++      status: "online",
++    },
++    capabilities: [...(input.blueprint.capabilities ?? [])],
++    totalBuildTicks,
++  };
++}
++
++export function createModuleFromConstructionJob(
++  job: {
++    id: string;
++    moduleName: string;
++    blueprintId: string;
++    facilityModuleId: string;
++    facilityModuleName: string;
++    totalBuildTicks: number;
++    remainingBuildTicks: number;
++    consumedMaterials: Record<string, number>;
++    runtimeAttributes: Record<string, unknown>;
++    capabilities: string[];
++  },
++  existingModules: HabitatModule[],
++): HabitatModule {
++  const module = {
++    id: job.moduleName,
++    name: job.moduleName,
++    blueprintId: job.blueprintId,
++    displayName: job.moduleName,
++    connectedTo: [],
++    runtimeAttributes: {
++      ...job.runtimeAttributes,
++      state: "online",
++      status: "online",
++      charge:
++        typeof job.runtimeAttributes.charge === "number" && Number.isFinite(job.runtimeAttributes.charge)
++          ? job.runtimeAttributes.charge
++          : undefined,
++    },
++    capabilities: [...job.capabilities],
++  };
++
++  return module;
++}
++
++export function advanceConstructionTick(
++  state: ConstructionHabitatState,
++  irradiance: number,
++): {
++  energyCost: number;
++  advancedConstructionTicks: number;
++  pausedConstructionTicks: number;
++  completedJobs: string[];
++  state: ConstructionHabitatState;
++} {
++  const completedJobs: string[] = [];
++  let advancedConstructionTicks = 0;
++  let pausedConstructionTicks = 0;
++  let energyCost = 0;
++  const totalPowerDraw = state.modules.reduce((total, module) => total + moduleCurrentPowerDraw(module), 0);
++  energyCost += totalPowerDraw;
++  state.power.powerConsumedTicks += totalPowerDraw;
++
++  const batteries = state.modules.filter((module) => isBatteryModule(module));
++  const onlineConsumers = state.modules.filter(
++    (module) => moduleCurrentState(module) === "online" && !isBatteryModule(module) && !isChargerModule(module),
++  );
++  const onlineChargers = state.modules.filter(
++    (module) => moduleCurrentState(module) === "online" && isChargerModule(module),
++  );
++  const totalDrain = onlineConsumers.length;
++  const totalCharge = onlineChargers.reduce((total, module) => total + chargerChargeRate(module, irradiance), 0);
++  const drainPerBattery = batteries.length > 0 ? totalDrain / batteries.length : 0;
++  const chargePerBattery = batteries.length > 0 ? totalCharge / batteries.length : 0;
++  const generatedCharge = onlineChargers.reduce(
++    (total, module) => total + solarGeneratedChargePerTick(module, irradiance),
++    0,
++  );
++  const totalRemainingCapacity = batteries.reduce((total, module) => total + batteryRemainingCapacity(module), 0);
++
++  for (const module of state.modules) {
++    const currentPowerTicks = module.runtimeAttributes.powerConsumedTicks;
++    const modulePowerDraw = moduleCurrentPowerDraw(module);
++    const nextPowerTicks =
++      typeof currentPowerTicks === "number" && Number.isFinite(currentPowerTicks)
++        ? currentPowerTicks + modulePowerDraw
++        : modulePowerDraw;
++
++    module.runtimeAttributes = {
++      ...module.runtimeAttributes,
++      powerConsumedTicks: nextPowerTicks,
++    };
++  }
++
++  for (const module of batteries) {
++    const remainingCapacity = batteryRemainingCapacity(module);
++    const batteryShare =
++      totalRemainingCapacity > 0 ? generatedCharge * (remainingCapacity / totalRemainingCapacity) : 0;
++    const nextCharge = computeBatteryChargeAfterTick(module, chargePerBattery, drainPerBattery);
++    const nextSolarCharge = applySolarChargeToBattery(
++      { ...module, runtimeAttributes: { ...module.runtimeAttributes, currentEnergyKwh: nextCharge, charge: nextCharge } },
++      batteryShare,
++    );
++    module.runtimeAttributes = {
++      ...module.runtimeAttributes,
++      currentEnergyKwh: nextSolarCharge,
++      charge: nextSolarCharge,
++    };
++  }
++
++  if (state.constructionJobs.length === 0) {
++    return { energyCost, advancedConstructionTicks, pausedConstructionTicks, completedJobs, state };
++  }
++
++  const nextJobs: Array<any> = [];
++  for (const job of state.constructionJobs as Array<any>) {
++    const facility = state.modules.find((module) => module.id === job.facilityModuleId);
++    const constructionPower = spendConstructionPower(state, 1);
++    if (!facility || !isModuleAvailable(facility) || !constructionPower.spent) {
++      pausedConstructionTicks += 1;
++      nextJobs.push(job);
++      continue;
++    }
++
++    const remainingBuildTicks = job.remainingBuildTicks - 1;
++    advancedConstructionTicks += 1;
++    if (remainingBuildTicks <= 0) {
++      state.modules.push(createModuleFromConstructionJob(job, state.modules));
++      completedJobs.push(job.moduleName);
++      continue;
++    }
++    nextJobs.push({ ...job, remainingBuildTicks });
++  }
++  state.constructionJobs = nextJobs;
++  return { energyCost, advancedConstructionTicks, pausedConstructionTicks, completedJobs, state };
++}
+diff --git a/habitat/src/domain/power.ts b/habitat/src/domain/power.ts
+new file mode 100644
+index 0000000..b4e64fa
+--- /dev/null
++++ b/habitat/src/domain/power.ts
+@@ -0,0 +1,217 @@
++import type { HabitatModule } from "./modules";
++
++export const BATTERY_MAX_CHARGE = 10000;
++
++function batteryStorageCapacity(module: HabitatModule): number {
++  const storage = module.runtimeAttributes.energyStorageKwh;
++  if (typeof storage === "number" && Number.isFinite(storage) && storage > 0) {
++    return storage;
++  }
++
++  return BATTERY_MAX_CHARGE;
++}
++
++function batteryCharge(module: HabitatModule): number {
++  const currentEnergy = module.runtimeAttributes.currentEnergyKwh;
++  if (typeof currentEnergy === "number" && Number.isFinite(currentEnergy)) {
++    return currentEnergy;
++  }
++
++  const charge = module.runtimeAttributes.charge;
++  return typeof charge === "number" && Number.isFinite(charge) ? charge : batteryStorageCapacity(module);
++}
++
++function moduleChargeLossMultiplier(module: HabitatModule): number {
++  const fromModule = module.runtimeAttributes.chargeLossPerTickMult;
++  if (typeof fromModule === "number" && Number.isFinite(fromModule)) {
++    return Math.min(1, Math.max(0.01, fromModule));
++  }
++
++  return 1;
++}
++
++function isModuleAvailable(module: HabitatModule): boolean {
++  const state = module.runtimeAttributes.state ?? module.runtimeAttributes.status;
++  return state === "online" || state === "idle" || state === "active";
++}
++
++function isModuleState(value: unknown): value is "online" | "offline" | "idle" | "active" | "damaged" {
++  return value === "online" || value === "offline" || value === "idle" || value === "active" || value === "damaged";
++}
++
++export function moduleCurrentState(module: HabitatModule): "online" | "offline" | "idle" | "active" | "damaged" {
++  const candidate = module.runtimeAttributes.state ?? module.runtimeAttributes.status;
++  return isModuleState(candidate) ? candidate : "offline";
++}
++
++export function moduleCurrentPowerDraw(module: HabitatModule): number {
++  const state = moduleCurrentState(module);
++  const byState = module.runtimeAttributes.powerDrawByState;
++
++  if (byState && typeof byState === "object") {
++    const candidate = (byState as Record<string, unknown>)[state];
++    if (typeof candidate === "number" && Number.isFinite(candidate)) {
++      return candidate;
++    }
++  }
++
++  const stateSpecificKey = `${state}PowerDraw`;
++  const stateSpecific = module.runtimeAttributes[stateSpecificKey];
++  if (typeof stateSpecific === "number" && Number.isFinite(stateSpecific)) {
++    return stateSpecific;
++  }
++
++  const draw = module.runtimeAttributes.powerDraw;
++  if (typeof draw === "number" && Number.isFinite(draw)) {
++    return draw;
++  }
++
++  return 0;
++}
++
++function isBatteryModule(module: HabitatModule): boolean {
++  const runtimeEnergyStorage = module.runtimeAttributes.energyStorageKwh;
++  const outputType = module.runtimeAttributes.moduleType;
++
++  return (
++    module.runtimeAttributes.isBattery === true ||
++    module.capabilities.includes("isBattery") ||
++    module.blueprintId === "battery-bank" ||
++    outputType === "battery-bank" ||
++    (typeof runtimeEnergyStorage === "number" && Number.isFinite(runtimeEnergyStorage) && runtimeEnergyStorage > 0) ||
++    module.blueprintId.toLowerCase().includes("battery") ||
++    (typeof outputType === "string" && outputType.toLowerCase().includes("battery"))
++  );
++}
++
++export function batteryConstructionDrainPerTick(module: HabitatModule): number {
++  const capacityMultiplier = moduleChargeLossMultiplier(module);
++  return 1 / (100 * capacityMultiplier);
++}
++
++export function batteryRemainingCapacity(module: HabitatModule): number {
++  return Math.max(0, batteryStorageCapacity(module) - batteryCharge(module));
++}
++
++export function solarGeneratedChargePerTick(module: HabitatModule, irradiance: number): number {
++  const powerGenerationKw = (() => {
++    const fromGeneration = module.runtimeAttributes.powerGenerationKw;
++    if (typeof fromGeneration === "number" && Number.isFinite(fromGeneration)) {
++      return fromGeneration;
++    }
++
++    const fromPower = module.runtimeAttributes.powerOutputKw;
++    if (typeof fromPower === "number" && Number.isFinite(fromPower)) {
++      return fromPower;
++    }
++
++    const fromRuntime = module.runtimeAttributes.generationKw;
++    if (typeof fromRuntime === "number" && Number.isFinite(fromRuntime)) {
++      return fromRuntime;
++    }
++
++    return 0;
++  })();
++
++  if (powerGenerationKw <= 0) {
++    return 0;
++  }
++
++  const solarMultiplier = irradiance / 900;
++  const solarEfficiency = 0.5;
++
++  return (powerGenerationKw * solarMultiplier * solarEfficiency) / 3600;
++}
++
++export function applySolarChargeToBattery(module: HabitatModule, generatedKwhPerTick: number): number {
++  const currentEnergy = batteryCharge(module);
++  return Math.min(batteryStorageCapacity(module), currentEnergy + Math.max(0, generatedKwhPerTick));
++}
++
++export function computeBatteryChargeAfterTick(
++  module: HabitatModule,
++  chargePerBattery: number,
++  drainPerBattery: number,
++): number {
++  const currentCharge = batteryCharge(module);
++  const selfDischarge = batteryConstructionDrainPerTick(module);
++  const nextCharge =
++    currentCharge + (chargePerBattery - drainPerBattery * moduleChargeLossMultiplier(module)) - selfDischarge;
++
++  return Math.max(0, Math.min(batteryStorageCapacity(module), nextCharge));
++}
++
++export function chargerChargeRate(module: HabitatModule, irradiance: number): number {
++  if (!isModuleAvailable(module)) {
++    return 0;
++  }
++
++  if (module.runtimeAttributes.isCharger !== true && !module.capabilities.includes("isCharger")) {
++    return 0;
++  }
++
++  const baseRate = (() => {
++    const runtimeRate = module.runtimeAttributes.chargePerTick;
++    if (typeof runtimeRate === "number" && Number.isFinite(runtimeRate)) {
++      return runtimeRate;
++    }
++    return 1;
++  })();
++
++  const upgradeLevelValue = module.runtimeAttributes.blueprintLevel ?? module.runtimeAttributes.level;
++  const upgradeLevel =
++    typeof upgradeLevelValue === "number" && Number.isFinite(upgradeLevelValue) ? upgradeLevelValue : 0;
++
++  return baseRate * irradiance * Math.pow(1.5, upgradeLevel);
++}
++
++export function spendConstructionPower(
++  state: { modules: HabitatModule[]; constructionJobs: Array<{ facilityModuleId: string }> },
++  amount: number,
++): { spent: boolean; remainingChargeByModuleId: Record<string, number> } {
++  if (!Number.isFinite(amount) || amount <= 0) {
++    return { spent: true, remainingChargeByModuleId: {} };
++  }
++
++  const batteries = state.modules.filter((module) => isModuleAvailable(module) && isBatteryModule(module));
++
++  if (batteries.length === 0) {
++    return { spent: false, remainingChargeByModuleId: {} };
++  }
++
++  const totalCharge = batteries.reduce((sum, module) => {
++    const currentCharge = module.runtimeAttributes.charge;
++    const normalizedCharge =
++      typeof currentCharge === "number" && Number.isFinite(currentCharge) ? currentCharge : BATTERY_MAX_CHARGE;
++    return sum + Math.max(0, normalizedCharge);
++  }, 0);
++
++  if (totalCharge < amount) {
++    return { spent: false, remainingChargeByModuleId: {} };
++  }
++
++  const nextChargeByModuleId: Record<string, number> = {};
++  const drawPerBattery = amount / batteries.length;
++
++  for (const module of batteries) {
++    const capacityMultiplier = moduleChargeLossMultiplier(module);
++    const currentCharge = module.runtimeAttributes.charge;
++    const normalizedCharge =
++      typeof currentCharge === "number" && Number.isFinite(currentCharge)
++        ? currentCharge
++        : batteryStorageCapacity(module);
++    const scaledConstructionDrain = drawPerBattery / (100 * capacityMultiplier);
++    const nextCharge = Math.max(0, normalizedCharge - scaledConstructionDrain);
++
++    nextChargeByModuleId[module.id] = nextCharge;
++  }
++
++  for (const module of batteries) {
++    module.runtimeAttributes = {
++      ...module.runtimeAttributes,
++      charge: nextChargeByModuleId[module.id] ?? 0,
++    };
++  }
++
++  return { spent: true, remainingChargeByModuleId: nextChargeByModuleId };
++}
+diff --git a/habitat/src/server/routes.ts b/habitat/src/server/routes.ts
+new file mode 100644
+index 0000000..8dabd71
+--- /dev/null
++++ b/habitat/src/server/routes.ts
+@@ -0,0 +1,27 @@
++import { Hono } from "hono";
++import { registerHealthRoute } from "./health";
++import { createStateService, type StateService } from "../state/service";
++import {
++  fetchKeplerBlueprintCatalog,
++  fetchKeplerHabitatRegistration,
++  fetchKeplerResourceCatalog,
++  fetchKeplerSolarIrradiance,
++} from "../kepler/service";
++
++const defaultStateService = createStateService({ storagePath: ".habitat/habitat.sqlite" });
++
++export function createApp(stateService: StateService = defaultStateService): Hono {
++  const app = new Hono();
++  registerHealthRoute(app);
++  app.get("/state", async (c) => c.json(await stateService.getState()));
++  app.post("/state", async (c) => c.json(await stateService.saveState(await c.req.json())));
++  app.delete("/state", async (c) => c.json(await stateService.resetState()));
++  app.get("/kepler/blueprints", async (c) => c.json(await fetchKeplerBlueprintCatalog()));
++  app.get("/kepler/resources", async (c) => c.json(await fetchKeplerResourceCatalog()));
++  app.get("/kepler/solar", async (c) => c.json({ irradiance: await fetchKeplerSolarIrradiance() }));
++  app.get("/kepler/habitats/:habitatId/registration", async (c) => {
++    const habitatId = c.req.param("habitatId");
++    return c.json(await fetchKeplerHabitatRegistration(habitatId));
++  });
++  return app;
++}
+diff --git a/habitat/test/domain-commands.test.ts b/habitat/test/domain-commands.test.ts
+new file mode 100644
+index 0000000..b28e021
+--- /dev/null
++++ b/habitat/test/domain-commands.test.ts
+@@ -0,0 +1,193 @@
++import { describe, expect, test } from "bun:test";
++import { runConstructCommand, runTickCommand } from "../src/domain/commands";
++import { canSpendInventory } from "../src/domain/inventory";
++
++function createStateService(state: unknown) {
++  let currentState = structuredClone(state);
++  return {
++    async getState() {
++      return structuredClone(currentState);
++    },
++    async saveState(nextState: unknown) {
++      currentState = structuredClone(nextState);
++      return structuredClone(currentState);
++    },
++    async resetState() {
++      currentState = {};
++      return {};
++    },
++  };
++}
++
++describe("inventory rules", () => {
++  test("detects when materials are available", () => {
++    expect(canSpendInventory({ steel: 2 }, { steel: 1 })).toBe(true);
++    expect(canSpendInventory({ steel: 1 }, { steel: 2 })).toBe(false);
++  });
++});
++
++describe("backend commands", () => {
++  test("tick restores module power, battery charging, solar charging, and construction advancement", async () => {
++    const stateService = createStateService({
++      modules: [
++        {
++          id: "consumer-1",
++          name: "consumer-1",
++          blueprintId: "workbench",
++          displayName: "Workbench",
++          connectedTo: [],
++          runtimeAttributes: { state: "online", powerDraw: 3 },
++          capabilities: [],
++        },
++        {
++          id: "battery-1",
++          name: "battery-1",
++          blueprintId: "battery-bank",
++          displayName: "Battery Bank",
++          connectedTo: [],
++          runtimeAttributes: { state: "online", isBattery: true, charge: 100, energyStorageKwh: 500 },
++          capabilities: ["isBattery"],
++        },
++        {
++          id: "solar-1",
++          name: "solar-1",
++          blueprintId: "small-solar-array",
++          displayName: "Small Solar Array",
++          connectedTo: [],
++          runtimeAttributes: { state: "online", isCharger: true, powerGenerationKw: 9 },
++          capabilities: ["isCharger"],
++        },
++        {
++          id: "facility-1",
++          name: "facility-1",
++          blueprintId: "workshop-fabricator",
++          displayName: "Workshop Fabricator",
++          connectedTo: [],
++          runtimeAttributes: { state: "online", moduleType: "workshop-fabricator" },
++          capabilities: [],
++        },
++        {
++          id: "supply-1",
++          name: "supply-1",
++          blueprintId: "supply-cache",
++          displayName: "Supply Cache",
++          connectedTo: [],
++          runtimeAttributes: { state: "online" },
++          capabilities: ["logistics"],
++        },
++      ],
++      inventory: {},
++      constructionJobs: [
++        {
++          id: "construction-1",
++          moduleName: "greenhouse-1",
++          blueprintId: "greenhouse",
++          facilityModuleId: "facility-1",
++          facilityModuleName: "Workshop Fabricator",
++          totalBuildTicks: 1,
++          remainingBuildTicks: 1,
++          consumedMaterials: {},
++          runtimeAttributes: {},
++          capabilities: [],
++        },
++      ],
++      power: { powerConsumedTicks: 0 },
++      blueprints: [],
++    });
++
++    const result = await runTickCommand({
++      stateService: stateService as never,
++      count: 1,
++      getIrradiance: async () => 900,
++    });
++
++    expect(result.energyCost).toBe(3);
++    expect(result.advancedConstructionTicks).toBe(1);
++    expect(result.pausedConstructionTicks).toBe(0);
++    expect(result.completedJobs).toEqual(["greenhouse-1"]);
++    expect(result.data.power.powerConsumedTicks).toBe(3);
++    expect(result.data.modules.find((module: any) => module.id === "consumer-1")?.runtimeAttributes.powerConsumedTicks).toBe(3);
++    expect(result.data.modules.find((module: any) => module.id === "battery-1")?.runtimeAttributes.charge).toBeGreaterThan(100);
++  });
++
++  test("construct allows multiple jobs for the same blueprint when facilities are available", async () => {
++    const stateService = createStateService({
++      modules: [
++        {
++          id: "facility-1",
++          name: "facility-1",
++          blueprintId: "workshop-fabricator",
++          displayName: "Workshop Fabricator A",
++          connectedTo: [],
++          runtimeAttributes: { state: "online", moduleType: "workshop-fabricator" },
++          capabilities: [],
++        },
++        {
++          id: "facility-2",
++          name: "facility-2",
++          blueprintId: "workshop-fabricator",
++          displayName: "Workshop Fabricator B",
++          connectedTo: [],
++          runtimeAttributes: { state: "online", moduleType: "workshop-fabricator" },
++          capabilities: [],
++        },
++        {
++          id: "supply-1",
++          name: "supply-1",
++          blueprintId: "supply-cache",
++          displayName: "Supply Cache",
++          connectedTo: [],
++          runtimeAttributes: { state: "online" },
++          capabilities: ["logistics"],
++        },
++        {
++          id: "battery-1",
++          name: "battery-1",
++          blueprintId: "battery-bank",
++          displayName: "Battery Bank",
++          connectedTo: [],
++          runtimeAttributes: { state: "online", isBattery: true, charge: 100 },
++          capabilities: ["isBattery"],
++        },
++      ],
++      inventory: {},
++      constructionJobs: [
++        {
++          id: "construction-existing",
++          moduleName: "existing-greenhouse",
++          blueprintId: "greenhouse",
++          facilityModuleId: "facility-1",
++          facilityModuleName: "Workshop Fabricator A",
++          totalBuildTicks: 4,
++          remainingBuildTicks: 4,
++          consumedMaterials: {},
++          runtimeAttributes: {},
++          capabilities: [],
++        },
++      ],
++      power: { powerConsumedTicks: 0 },
++      blueprints: [],
++    });
++
++    const result = await runConstructCommand({
++      stateService: stateService as never,
++      blueprintId: "greenhouse",
++      getBlueprints: async () => [
++        {
++          blueprintId: "greenhouse",
++          displayName: "Greenhouse",
++          status: "published",
++          output: { itemType: "module", moduleType: "greenhouse" },
++          inputs: {},
++          buildTicks: 4,
++          requiredFacility: { moduleType: "workshop-fabricator" },
++        },
++      ] as never,
++    });
++
++    expect((result as { message: string }).message).toContain("Started construction");
++    const nextState = await stateService.getState();
++    expect(nextState.constructionJobs).toHaveLength(2);
++    expect(nextState.constructionJobs.map((job: any) => job.facilityModuleId)).toEqual(["facility-1", "facility-2"]);
++  });
++});

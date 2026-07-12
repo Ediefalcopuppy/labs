@@ -1,8 +1,22 @@
 #!/usr/bin/env bun
 import { Command, InvalidArgumentError } from "commander";
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { copyFile, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { getBackendState, saveBackendState } from "./client";
+import { normalizeState } from "./state/service";
+import { readJsonFile, readSqliteState, writeSqliteState } from "./storage";
+import type {
+  Airlock,
+  ConstructionJob,
+  Door,
+  HabitatInventory,
+  HabitatPowerTick,
+  HabitatRegistration,
+  HabitatState,
+  StarterModuleInstance,
+  Zone,
+} from "./state/types";
 import {
   fetchKeplerBlueprintCatalog,
   fetchKeplerHabitatRegistration,
@@ -26,175 +40,29 @@ import {
   spendConstructionPower,
   solarGeneratedChargePerTick,
 } from "./construction";
-
-type Zone = {
-  name: string;
-  purpose: string;
-  status: string;
-};
-
-type Airlock = {
-  name: string;
-  pressureLevel: number;
-  locked: boolean;
-};
-
-type Door = {
-  name: string;
-  airlockName?: string;
-};
-
-type HabitatPowerTick = {
-  powerConsumedTicks: number;
-};
-
-type HabitatInventory = Record<string, number>;
+import { canSpendInventory as canSpendInventoryDomain, spendInventoryMaterials as spendInventoryMaterialsDomain } from "./domain/inventory";
 
 type HabitatModule = StarterModuleInstance;
 
 type ModuleState = "online" | "offline" | "idle" | "active" | "damaged";
 
-type HabitatRegistration = {
-  displayName: string;
-  registeredAt: string;
-  lastSyncedAt: string;
-  habitatId?: string;
-  habitatSlug?: string;
-  catalogVersion?: string;
-  remoteStatus?: string;
-  lastSeenAt?: string | null;
-};
-
-type StarterModuleInstance = {
-  id: string;
-  name: string;
-  blueprintId: string;
-  displayName: string;
-  connectedTo: string[];
-  runtimeAttributes: Record<string, unknown>;
-  capabilities: string[];
-};
-
 type ProductionBlueprint = KeplerBlueprintCatalogEntry;
 
 type ResourceCatalogEntry = KeplerResourceCatalogEntry;
 
-type ConstructionJob = {
-  id: string;
-  moduleName: string;
-  blueprintId: string;
-  facilityModuleId: string;
-  facilityModuleName: string;
-  totalBuildTicks: number;
-  remainingBuildTicks: number;
-  consumedMaterials: Record<string, number>;
-  runtimeAttributes: Record<string, unknown>;
-  capabilities: string[];
-};
-
-type HabitatData = {
-  zones: Zone[];
-  airlocks: Airlock[];
-  doors: Door[];
-  modules: HabitatModule[];
-  blueprints: ProductionBlueprint[];
-  inventory: HabitatInventory;
-  constructionJobs: ConstructionJob[];
-  power: HabitatPowerTick;
-  registration?: HabitatRegistration;
-};
+type HabitatData = HabitatState;
 
 const dataDir = join(process.cwd(), ".habitat");
 const dataPath = join(dataDir, "data.json");
-
-function createEmptyData(): HabitatData {
-  return {
-    zones: [],
-    airlocks: [],
-    doors: [],
-    modules: [],
-    blueprints: [],
-    inventory: {},
-    constructionJobs: [],
-    power: {
-      powerConsumedTicks: 0,
-    },
-  };
-}
-
-function normalizeData(data: unknown): HabitatData {
-  if (data === null || typeof data !== "object") {
-    throw new Error(`${dataPath} should contain a JSON object.`);
-  }
-
-  const candidate = data as Partial<HabitatData>;
-  const modules = Array.isArray(candidate.modules)
-    ? (candidate.modules as HabitatModule[])
-    : [];
-  const blueprints = Array.isArray(candidate.blueprints)
-    ? candidate.blueprints
-    : [];
-  const inventory =
-    candidate.inventory && typeof candidate.inventory === "object"
-      ? Object.fromEntries(
-          Object.entries(candidate.inventory).filter(
-            ([key, value]) =>
-              typeof key === "string" &&
-              typeof value === "number" &&
-              Number.isFinite(value) &&
-              value >= 0,
-          ),
-        )
-      : {};
-  const constructionJobs = Array.isArray(candidate.constructionJobs)
-    ? (candidate.constructionJobs as ConstructionJob[])
-    : [];
-
-  return {
-    zones: Array.isArray(candidate.zones) ? candidate.zones : [],
-    airlocks: Array.isArray(candidate.airlocks) ? candidate.airlocks : [],
-    doors: Array.isArray(candidate.doors) ? candidate.doors : [],
-    modules,
-    blueprints,
-    inventory,
-    constructionJobs,
-    power:
-      candidate.power && typeof candidate.power === "object"
-        ? {
-            powerConsumedTicks:
-              typeof candidate.power.powerConsumedTicks === "number" &&
-              Number.isFinite(candidate.power.powerConsumedTicks)
-                ? candidate.power.powerConsumedTicks
-                : 0,
-          }
-        : {
-            powerConsumedTicks: 0,
-          },
-    registration:
-      candidate.registration && typeof candidate.registration === "object"
-        ? normalizeRegistration(candidate.registration as Partial<HabitatRegistration>)
-        : undefined,
-  };
-}
+const dataBackupPath = join(dataDir, "data.json.backup");
+const sqlitePath = join(dataDir, "habitat.sqlite");
 
 async function readData(): Promise<HabitatData> {
-  try {
-    const contents = await readFile(dataPath, "utf8");
-    return normalizeData(JSON.parse(contents) as unknown);
-  } catch (error) {
-    const fileError = error as { code?: string };
-
-    if (error instanceof Error && fileError.code === "ENOENT") {
-      return createEmptyData();
-    }
-
-    throw error;
-  }
+  return getBackendState<HabitatData>();
 }
 
 async function writeData(data: HabitatData): Promise<void> {
-  await mkdir(dataDir, { recursive: true });
-  await writeFile(dataPath, `${JSON.stringify(data, null, 2)}\n`);
+  await saveBackendState(data);
 }
 
 function cloneJson<T>(value: T): T {
@@ -390,22 +258,14 @@ function inventoryHasMaterials(
   inventory: HabitatInventory,
   requiredMaterials: Record<string, number>,
 ): boolean {
-  return Object.entries(requiredMaterials).every(
-    ([resourceId, amount]) => (inventory[resourceId] ?? 0) >= amount,
-  );
+  return canSpendInventoryDomain(inventory, requiredMaterials);
 }
 
 function spendInventoryMaterials(
   inventory: HabitatInventory,
   requiredMaterials: Record<string, number>,
 ): HabitatInventory {
-  const nextInventory = { ...inventory };
-
-  for (const [resourceId, amount] of Object.entries(requiredMaterials)) {
-    nextInventory[resourceId] = Math.max(0, (nextInventory[resourceId] ?? 0) - amount);
-  }
-
-  return nextInventory;
+  return spendInventoryMaterialsDomain(inventory, requiredMaterials);
 }
 
 function hasUsableConstructionPower(data: HabitatData): boolean {
@@ -804,6 +664,7 @@ Object schemas:
   power:   { powerConsumedTicks: number }
 
 Command map:
+  habitat migrate sqlite
   habitat register --name <habitat name>
   habitat link --id <habitatId>
   habitat unregister
@@ -870,10 +731,43 @@ Common workflow:
   habitat door show outer
 
 Data:
-  Stored in .habitat/data.json in the current working directory.
+  Served by the local Habitat backend started with bun run server.
   The file shape is { "zones": [], "airlocks": [], "doors": [], "modules": [], "blueprints": [], "inventory": {}, "constructionJobs": [], "power": { "powerConsumedTicks": 0 }, "registration": {} }.
 `,
   );
+
+const migrateCommand = new Command("migrate")
+  .description("Migrate local Habitat data between storage formats.")
+  .showHelpAfterError("Try 'habitat migrate --help' to see migration commands.");
+
+migrateCommand
+  .command("sqlite")
+  .description("Transfer the legacy local JSON data into SQLite.")
+  .action(async () => {
+    const state = normalizeState(await readJsonFile(dataPath));
+    if (await readSqliteState(sqlitePath) !== undefined) {
+      program.error("SQLite data already exists; refusing to overwrite it.");
+    }
+
+    await copyFile(dataPath, dataBackupPath);
+    await writeSqliteState(sqlitePath, state);
+    console.log(`Migrated legacy Habitat data to ${sqlitePath}.`);
+    console.log(`Saved the original JSON data to ${dataBackupPath}.`);
+  });
+
+migrateCommand
+  .command("restore")
+  .description("Restore data.json.backup and replace the SQLite state with it.")
+  .action(async () => {
+    const state = normalizeState(await readJsonFile(dataBackupPath));
+    await writeFile(dataPath, `${JSON.stringify(state, null, 2)}\n`);
+    await writeSqliteState(sqlitePath, state);
+
+    console.log(`Restored legacy local JSON data to ${dataPath}.`);
+    console.log(`Rebuilt SQLite state at ${sqlitePath}.`);
+  });
+
+program.addCommand(migrateCommand);
 
 program.on("command:*", ([command]) => {
   program.error(`Habitat does not know the command '${command}'.`, {
@@ -883,7 +777,7 @@ program.on("command:*", ([command]) => {
 
 program
   .command("register")
-  .description("Register this habitat locally.")
+  .description("Register this habitat through the backend.")
   .requiredOption("-n, --name <habitatName>", "habitat display name")
   .action(async (options: { name: string }) => {
     const data = await readData();
@@ -910,8 +804,8 @@ program
   .addHelpText(
     "after",
     `
-Looks up an already-registered habitat from Kepler and stores its identity in .habitat/data.json.
-This links local state to an existing habitat id; it does not create a new habitat and it does not hydrate starter modules.
+Looks up an already-registered habitat from Kepler and stores its identity through the backend.
+This links the current habitat id to an existing habitat; it does not create a new habitat and it does not hydrate starter modules.
 
 Examples:
   habitat link --id hab_123456
@@ -934,7 +828,7 @@ Examples:
 
 program
   .command("unregister")
-  .description("Remove the local habitat registration.")
+  .description("Remove the habitat registration.")
   .action(async () => {
     const data = await readData();
 
@@ -952,11 +846,11 @@ program
 
 program
   .command("status")
-  .description("Show the local habitat status.")
+  .description("Show the habitat status.")
   .addHelpText(
     "after",
     `
-Shows the registered habitat name, local object counts, stored power ticks, and a module power summary.
+Shows the registered habitat name, object counts, stored power ticks, and a module power summary.
 
 Examples:
   habitat status
@@ -1064,15 +958,14 @@ program.addCommand(solarCommand);
 
 program
   .command("construct")
-  .description("Start construction from a live Kepler blueprint.")
+  .description("Start construction from a live Kepler blueprint through the backend.")
   .argument("<blueprint-id>", "published blueprint id")
   .option("-d, --display-name <displayName>", "visible module display name")
   .option("--dry-run", "check whether construction can start without changing local files")
   .addHelpText(
     "after",
     `
-The blueprint is fetched from Kepler at command time, so the server remains the source of truth for build properties.
-Construction state is stored locally in .habitat/data.json.
+The blueprint is fetched from Kepler at command time, so the backend remains the source of truth for build properties and construction state.
 
 Examples:
   habitat construct greenhouse
@@ -1314,7 +1207,7 @@ Examples:
 Notes:
   name is the lookup key for show, update, and delete.
   update changes only the fields you provide.
-  zones are stored in the zones array in .habitat/data.json.
+  zones are stored in backend habitat state.
 `,
   );
 
@@ -1444,7 +1337,7 @@ Notes:
   add-door stores the airlock name on the door as airlockName.
   deleting an airlock clears airlockName from attached doors.
   update changes only the fields you provide.
-  airlocks are stored in the airlocks array in .habitat/data.json.
+  airlocks are stored in backend habitat state.
 `,
   );
 
@@ -1632,8 +1525,8 @@ Commands:
   habitat module delete <name>
 
 Notes:
-  name is the lookup key and displayName for local modules.
-  create starts a local construction job from the cached blueprint catalog.
+  name is the lookup key and displayName for modules.
+  create starts a construction job from the cached blueprint catalog.
   the finished module appears only after enough ticks complete the job.
   once built, the module is independent from the catalog.
   -l lists the cached blueprint ids and display names.
@@ -1642,7 +1535,7 @@ Notes:
   power draw prefers runtimeAttributes.powerDrawByState, then state-specific power draw fields, then runtimeAttributes.powerDraw.
   batteries also display charge, capped at 100.
   set-status changes only runtimeAttributes.status on the matching module id.
-  normalize-names converts local module names to lowercase slugs with the lowest available numeric suffix.
+  normalize-names converts module names to lowercase slugs with the lowest available numeric suffix.
 `,
   );
 
@@ -1668,7 +1561,7 @@ moduleCommand.action(async (options: { listBlueprints?: boolean } = {}) => {
 
 moduleCommand
   .command("create")
-  .description("Start local construction from a cached blueprint.")
+  .description("Start construction from a cached blueprint.")
   .argument("<name>", "module display name")
   .option("-d, --display-name <displayName>", "visible module display name")
   .requiredOption("-b, --blueprint-id <blueprintId>", "published blueprint id")
@@ -1676,7 +1569,7 @@ moduleCommand
     "after",
     `
 The blueprint must exist in the cached blueprint catalog and must output a module.
-Starting construction spends the required local materials and creates a local construction job.
+Starting construction spends the required materials and creates a construction job.
 The finished module appears only after enough ticks complete the job.
 `,
   )
@@ -2106,7 +1999,7 @@ Examples:
 
 Notes:
   list fetches the live resource catalog from Kepler.
-  the catalog is not cached locally.
+  the catalog is not cached in the CLI.
   output shows the resource id and display name.
 `,
   );
@@ -2143,7 +2036,7 @@ resourceCommand.on("command:*", ([command]) => {
 program.addCommand(resourceCommand);
 
 const inventoryCommand = new Command("inventory")
-  .description("Manage local habitat inventory.")
+  .description("Manage habitat inventory.")
   .showHelpAfterError("Try 'habitat inventory --help' to see inventory commands.")
   .addHelpText(
     "after",
@@ -2153,19 +2046,19 @@ Commands:
   habitat inventory set <resource-id> <amount>
 
 Notes:
-  inventory is local habitat state and is separate from the Kepler resource catalog.
+  inventory lives in habitat state and is separate from the Kepler resource catalog.
 `,
   );
 
 inventoryCommand
   .command("list")
-  .description("List local inventory.")
+  .description("List inventory.")
   .action(async () => {
     const data = await readData();
     const entries = Object.entries(data.inventory).sort(([left], [right]) => left.localeCompare(right));
 
     if (entries.length === 0) {
-      console.log("No local inventory resources found.");
+      console.log("No inventory resources found.");
       return;
     }
 
@@ -2176,7 +2069,7 @@ inventoryCommand
 
 inventoryCommand
   .command("set")
-  .description("Set a local inventory amount.")
+  .description("Set an inventory amount.")
   .argument("<resource-id>", "resource id")
   .argument("<amount>", "resource amount", parseInventoryAmount)
   .action(async (resourceId: string, amount: number) => {
@@ -2184,7 +2077,7 @@ inventoryCommand
     data.inventory[resourceId] = amount;
     await writeData(data);
 
-    console.log(`Set local inventory '${resourceId}' to ${amount}.`);
+    console.log(`Set inventory '${resourceId}' to ${amount}.`);
   });
 
 inventoryCommand.on("command:*", ([command]) => {
@@ -2196,7 +2089,7 @@ inventoryCommand.on("command:*", ([command]) => {
 program.addCommand(inventoryCommand);
 
 const constructionCommand = new Command("construction")
-  .description("Inspect local construction jobs.")
+  .description("Inspect construction jobs.")
   .showHelpAfterError("Try 'habitat construction --help' to see construction commands.")
   .addHelpText(
     "after",
@@ -2212,7 +2105,7 @@ Notes:
 
 constructionCommand
   .command("list")
-  .description("List local construction jobs.")
+  .description("List construction jobs.")
   .action(async () => {
     const data = await readData();
 
@@ -2230,7 +2123,7 @@ constructionCommand
 
 constructionCommand
   .command("cancel")
-  .description("Cancel a local construction job.")
+  .description("Cancel a construction job.")
   .argument("<job-id>", "construction job id")
   .action(async (jobId: string) => {
     const data = await readData();
@@ -2255,7 +2148,7 @@ constructionCommand.on("command:*", ([command]) => {
 program.addCommand(constructionCommand);
 
 const debugCommand = new Command("debug")
-  .description("Debug-only commands for local habitat state.")
+  .description("Debug-only commands for habitat state.")
   .showHelpAfterError("Try 'habitat debug --help' to see debug commands.")
   .addHelpText(
     "after",
@@ -2277,7 +2170,7 @@ debugCommand
     "after",
     `
 This command skips the normal facility, inventory, prerequisite, and power checks.
-It still fetches the blueprint from Kepler and stores the created module locally.
+It still fetches the blueprint from Kepler and stores the created module through the backend.
 
 Examples:
   habitat debug construct greenhouse
@@ -2419,7 +2312,7 @@ Examples:
 
 Notes:
   name is the lookup key for show, update, delete, and add-door.
-  doors are stored in the doors array in .habitat/data.json.
+  doors are stored in backend habitat state.
 `,
   );
 
