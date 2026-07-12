@@ -3,7 +3,7 @@ import { Command, InvalidArgumentError } from "commander";
 import { randomUUID } from "node:crypto";
 import { copyFile, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { getBackendState, saveBackendState } from "./client";
+import { getBackendCommand, getBackendState, saveBackendState } from "./client";
 import { normalizeState } from "./state/service";
 import { readJsonFile, readSqliteState, writeSqliteState } from "./storage";
 import type {
@@ -955,6 +955,49 @@ solarCommand.on("command:*", ([command]) => {
 });
 
 program.addCommand(solarCommand);
+
+const powerCommand = new Command("power")
+  .description("Inspect habitat power information.")
+  .showHelpAfterError("Try 'habitat power --help' to see power commands.")
+  .addHelpText(
+    "after",
+    `
+Commands:
+  habitat power overview
+
+Examples:
+  habitat power overview
+`,
+  );
+
+powerCommand
+  .command("overview")
+  .description("Show a power summary.")
+  .action(async () => {
+    const overview = await getBackendCommand<{
+      registered: boolean;
+      moduleStates: Record<string, number>;
+      totalPowerDraw: number;
+      powerConsumedTicks: number;
+      moduleCount: number;
+      constructionJobs: number;
+    }>("/commands/power/overview");
+
+    console.log(`Registered: ${overview.registered ? "yes" : "no"}`);
+    console.log(`Modules: ${overview.moduleCount}`);
+    console.log(`Construction jobs: ${overview.constructionJobs}`);
+    console.log(`Power consumed ticks: ${overview.powerConsumedTicks}`);
+    console.log(`Total current module power draw: ${overview.totalPowerDraw}`);
+    console.log(`Module states: ${JSON.stringify(overview.moduleStates)}`);
+  });
+
+powerCommand.on("command:*", ([command]) => {
+  powerCommand.error(`Habitat does not know the power command '${command}'.`, {
+    code: "commander.unknownCommand",
+  });
+});
+
+program.addCommand(powerCommand);
 
 program
   .command("construct")
@@ -2115,6 +2158,24 @@ constructionCommand
     }
 
     for (const job of data.constructionJobs) {
+      console.log(
+        `${job.id} | module: ${slugDisplayName(job.moduleName)} | blueprint: ${job.blueprintId} | facility: ${slugDisplayName(job.facilityModuleName)} | remaining: ${job.remainingBuildTicks}/${job.totalBuildTicks}`,
+      );
+    }
+  });
+
+constructionCommand
+  .command("status")
+  .description("Show construction jobs.")
+  .action(async () => {
+    const jobs = await getBackendCommand<ConstructionJob[]>("/commands/construction/status");
+
+    if (jobs.length === 0) {
+      console.log("No construction jobs found.");
+      return;
+    }
+
+    for (const job of jobs) {
       console.log(
         `${job.id} | module: ${slugDisplayName(job.moduleName)} | blueprint: ${job.blueprintId} | facility: ${slugDisplayName(job.facilityModuleName)} | remaining: ${job.remainingBuildTicks}/${job.totalBuildTicks}`,
       );

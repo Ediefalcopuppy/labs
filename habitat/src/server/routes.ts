@@ -71,6 +71,29 @@ export function createApp(stateService: StateService = defaultStateService): Hon
     return c.json({ displayName });
   });
   app.get("/commands/status", async (c) => c.json(await stateService.getState()));
+  app.get("/commands/power/overview", async (c) => {
+    const data = await stateService.getState();
+    const moduleStates = data.modules.reduce<Record<string, number>>(
+      (counts, module) => {
+        const state = moduleCurrentState(module);
+        counts[state] = (counts[state] ?? 0) + 1;
+        return counts;
+      },
+      {},
+    );
+    const totalPowerDraw = data.modules.reduce((sum, module) => {
+      const candidate = module.runtimeAttributes.powerDraw;
+      return sum + (typeof candidate === "number" && Number.isFinite(candidate) ? candidate : 0);
+    }, 0);
+    return c.json({
+      registered: Boolean(data.registration),
+      moduleStates,
+      totalPowerDraw,
+      powerConsumedTicks: data.power.powerConsumedTicks,
+      moduleCount: data.modules.length,
+      constructionJobs: data.constructionJobs.length,
+    });
+  });
   app.get("/commands/solar/status", async (c) => {
     const data = await stateService.getState();
     const irradiance = await fetchKeplerSolarIrradiance();
@@ -96,6 +119,7 @@ export function createApp(stateService: StateService = defaultStateService): Hon
   app.get("/commands/inventory/list", async (c) => c.json((await stateService.getState()).inventory));
   app.post("/commands/inventory/set", async (c) => c.json(await runInventorySetCommand({ stateService, ...(await c.req.json()) as { resourceId: string; amount: number } })));
   app.get("/commands/construction/list", async (c) => c.json((await stateService.getState()).constructionJobs));
+  app.get("/commands/construction/status", async (c) => c.json((await stateService.getState()).constructionJobs));
   app.delete("/commands/construction/:jobId", async (c) => {
     const data = await stateService.getState();
     data.constructionJobs = data.constructionJobs.filter((job) => job.id !== c.req.param("jobId"));
