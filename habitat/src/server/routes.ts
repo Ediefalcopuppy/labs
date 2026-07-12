@@ -36,10 +36,22 @@ function isBattery(module: { capabilities: string[]; runtimeAttributes: Record<s
 export function createApp(stateService: StateService = defaultStateService): Hono {
   const app = new Hono();
   registerHealthRoute(app);
+  app.use("*", async (c, next) => {
+    const startedAt = Date.now();
+    console.log(`[request] ${c.req.method} ${new URL(c.req.url).pathname}`);
+    await next();
+    console.log(`[response] ${c.req.method} ${new URL(c.req.url).pathname} ${c.res.status} ${Date.now() - startedAt}ms`);
+  });
 
   app.get("/state", async (c) => c.json(await stateService.getState()));
-  app.post("/state", async (c) => c.json(await stateService.saveState(await c.req.json())));
-  app.delete("/state", async (c) => c.json(await stateService.resetState()));
+  app.post("/state", async (c) => {
+    console.log("[action] save habitat state");
+    return c.json(await stateService.saveState(await c.req.json()));
+  });
+  app.delete("/state", async (c) => {
+    console.log("[action] reset habitat state");
+    return c.json(await stateService.resetState());
+  });
 
   app.get("/kepler/blueprints", async (c) => c.json(await fetchKeplerBlueprintCatalog()));
   app.get("/kepler/resources", async (c) => c.json(await fetchKeplerResourceCatalog()));
@@ -47,6 +59,7 @@ export function createApp(stateService: StateService = defaultStateService): Hon
   app.get("/kepler/habitats/:habitatId/registration", async (c) => c.json(await fetchKeplerHabitatRegistration(c.req.param("habitatId"))));
 
   app.post("/commands/register", async (c) => {
+    console.log("[action] register habitat");
     const { name } = (await c.req.json()) as { name: string };
     const data = await stateService.getState();
     if (data.registration) throw new Error(`This directory is already registered as '${data.registration.displayName}'.`);
@@ -55,6 +68,7 @@ export function createApp(stateService: StateService = defaultStateService): Hon
     return c.json(await stateService.saveState(data));
   });
   app.post("/commands/link", async (c) => {
+    console.log("[action] link habitat");
     const { id } = (await c.req.json()) as { id: string };
     const data = await stateService.getState();
     if (data.registration) throw new Error(`This directory is already registered as '${data.registration.displayName}'.`);
@@ -64,6 +78,7 @@ export function createApp(stateService: StateService = defaultStateService): Hon
     return c.json(await stateService.saveState(data));
   });
   app.delete("/commands/unregister", async (c) => {
+    console.log("[action] unregister habitat");
     const data = await stateService.getState();
     const displayName = data.registration?.displayName;
     delete data.registration;
@@ -72,6 +87,7 @@ export function createApp(stateService: StateService = defaultStateService): Hon
   });
   app.get("/commands/status", async (c) => c.json(await stateService.getState()));
   app.get("/commands/power/overview", async (c) => {
+    console.log("[action] compute power overview");
     const data = await stateService.getState();
     const moduleStates = data.modules.reduce<Record<string, number>>(
       (counts, module) => {
@@ -95,6 +111,7 @@ export function createApp(stateService: StateService = defaultStateService): Hon
     });
   });
   app.get("/commands/solar/status", async (c) => {
+    console.log("[action] inspect solar status");
     const data = await stateService.getState();
     const irradiance = await fetchKeplerSolarIrradiance();
     const chargers = data.modules.filter((module) => moduleCurrentState(module) === "online" && isCharger(module));
@@ -102,6 +119,7 @@ export function createApp(stateService: StateService = defaultStateService): Hon
   });
 
   app.get("/commands/blueprint/list", async (c) => {
+    console.log("[action] refresh blueprint catalog");
     const blueprints = await fetchKeplerBlueprintCatalog();
     const data = await stateService.getState();
     data.blueprints = blueprints;
@@ -109,29 +127,51 @@ export function createApp(stateService: StateService = defaultStateService): Hon
     return c.json(blueprints);
   });
   app.get("/commands/blueprint/:blueprintId", async (c) => {
+    console.log(`[action] show blueprint ${c.req.param("blueprintId")}`);
     const data = await stateService.getState();
     const blueprint = data.blueprints.find((candidate) => candidate.blueprintId === c.req.param("blueprintId"));
     if (!blueprint) throw new Error(`No blueprint with id '${c.req.param("blueprintId")}' exists.`);
     return c.json(blueprint);
   });
-  app.get("/commands/resource/list", async (c) => c.json(await fetchKeplerResourceCatalog()));
+  app.get("/commands/resource/list", async (c) => {
+    console.log("[action] list resources");
+    return c.json(await fetchKeplerResourceCatalog());
+  });
 
   app.get("/commands/inventory/list", async (c) => c.json((await stateService.getState()).inventory));
-  app.post("/commands/inventory/set", async (c) => c.json(await runInventorySetCommand({ stateService, ...(await c.req.json()) as { resourceId: string; amount: number } })));
+  app.post("/commands/inventory/set", async (c) => {
+    console.log("[action] set inventory");
+    return c.json(await runInventorySetCommand({ stateService, ...(await c.req.json()) as { resourceId: string; amount: number } }));
+  });
   app.get("/commands/construction/list", async (c) => c.json((await stateService.getState()).constructionJobs));
   app.get("/commands/construction/status", async (c) => c.json((await stateService.getState()).constructionJobs));
   app.delete("/commands/construction/:jobId", async (c) => {
+    console.log(`[action] cancel construction ${c.req.param("jobId")}`);
     const data = await stateService.getState();
     data.constructionJobs = data.constructionJobs.filter((job) => job.id !== c.req.param("jobId"));
     return c.json(await stateService.saveState(data));
   });
 
-  app.post("/commands/construct", async (c) => c.json(await runConstructCommand({ stateService, ...(await c.req.json()) as { blueprintId: string; displayName?: string; moduleName?: string; dryRun?: boolean } })));
-  app.post("/commands/module/create", async (c) => c.json(await runConstructCommand({ stateService, ...(await c.req.json()) as { blueprintId: string; displayName?: string; moduleName?: string; dryRun?: boolean } })));
-  app.post("/commands/module/set-status", async (c) => c.json(await runModuleSetStatusCommand({ stateService, ...(await c.req.json()) as { moduleId: string; status: string } })));
-  app.post("/commands/tick", async (c) => c.json(await runTickCommand({ stateService, count: (await c.req.json()) as { count: number } as any })));
+  app.post("/commands/construct", async (c) => {
+    console.log("[action] construct from blueprint");
+    return c.json(await runConstructCommand({ stateService, ...(await c.req.json()) as { blueprintId: string; displayName?: string; moduleName?: string; dryRun?: boolean } }));
+  });
+  app.post("/commands/module/create", async (c) => {
+    console.log("[action] create module from blueprint");
+    return c.json(await runConstructCommand({ stateService, ...(await c.req.json()) as { blueprintId: string; displayName?: string; moduleName?: string; dryRun?: boolean } }));
+  });
+  app.post("/commands/module/set-status", async (c) => {
+    console.log("[action] set module status");
+    return c.json(await runModuleSetStatusCommand({ stateService, ...(await c.req.json()) as { moduleId: string; status: string } }));
+  });
+  app.post("/commands/tick", async (c) => {
+    const { count } = (await c.req.json()) as { count: number };
+    console.log(`[action] tick ${count}`);
+    return c.json(await runTickCommand({ stateService, count } as any));
+  });
 
   app.post("/commands/zone/create", async (c) => {
+    console.log("[action] create zone");
     const { name, purpose, status } = (await c.req.json()) as { name: string; purpose: string; status: string };
     const data = await stateService.getState();
     if (data.zones.some((zone) => zone.name === name)) throw new Error(`A zone named '${name}' already exists.`);
@@ -141,6 +181,7 @@ export function createApp(stateService: StateService = defaultStateService): Hon
   app.get("/commands/zone/list", async (c) => c.json((await stateService.getState()).zones));
   app.get("/commands/zone/:name", async (c) => c.json(requireItem((await stateService.getState()).zones, (z) => z.name === c.req.param("name"), `No zone named '${c.req.param("name")}' exists.`)));
   app.post("/commands/zone/:name", async (c) => {
+    console.log(`[action] update zone ${c.req.param("name")}`);
     const body = (await c.req.json()) as { purpose?: string; status?: string };
     const data = await stateService.getState();
     const zone = requireItem(data.zones, (z) => z.name === c.req.param("name"), `No zone named '${c.req.param("name")}' exists.`);
@@ -149,12 +190,14 @@ export function createApp(stateService: StateService = defaultStateService): Hon
     return c.json(await stateService.saveState(data));
   });
   app.delete("/commands/zone/:name", async (c) => {
+    console.log(`[action] delete zone ${c.req.param("name")}`);
     const data = await stateService.getState();
     data.zones = data.zones.filter((zone) => zone.name !== c.req.param("name"));
     return c.json(await stateService.saveState(data));
   });
 
   app.post("/commands/airlock/create", async (c) => {
+    console.log("[action] create airlock");
     const body = (await c.req.json()) as { name: string; pressureLevel: number; locked: boolean };
     const data = await stateService.getState();
     if (data.airlocks.some((airlock) => airlock.name === body.name)) throw new Error(`An airlock named '${body.name}' already exists.`);
@@ -164,6 +207,7 @@ export function createApp(stateService: StateService = defaultStateService): Hon
   app.get("/commands/airlock/list", async (c) => c.json((await stateService.getState()).airlocks));
   app.get("/commands/airlock/:name", async (c) => c.json(requireItem((await stateService.getState()).airlocks, (a) => a.name === c.req.param("name"), `No airlock named '${c.req.param("name")}' exists.`)));
   app.post("/commands/airlock/:name", async (c) => {
+    console.log(`[action] update airlock ${c.req.param("name")}`);
     const body = (await c.req.json()) as { pressureLevel?: number; locked?: boolean };
     const data = await stateService.getState();
     const airlock = requireItem(data.airlocks, (a) => a.name === c.req.param("name"), `No airlock named '${c.req.param("name")}' exists.`);
@@ -172,6 +216,7 @@ export function createApp(stateService: StateService = defaultStateService): Hon
     return c.json(await stateService.saveState(data));
   });
   app.delete("/commands/airlock/:name", async (c) => {
+    console.log(`[action] delete airlock ${c.req.param("name")}`);
     const data = await stateService.getState();
     const name = c.req.param("name");
     data.airlocks = data.airlocks.filter((airlock) => airlock.name !== name);
@@ -179,6 +224,7 @@ export function createApp(stateService: StateService = defaultStateService): Hon
     return c.json(await stateService.saveState(data));
   });
   app.post("/commands/airlock/:name/add-door", async (c) => {
+    console.log(`[action] attach door to airlock ${c.req.param("name")}`);
     const { doorName } = (await c.req.json()) as { doorName: string };
     const data = await stateService.getState();
     const airlock = requireItem(data.airlocks, (a) => a.name === c.req.param("name"), `No airlock named '${c.req.param("name")}' exists.`);
@@ -188,6 +234,7 @@ export function createApp(stateService: StateService = defaultStateService): Hon
   });
 
   app.post("/commands/door/create", async (c) => {
+    console.log("[action] create door");
     const { name } = (await c.req.json()) as { name: string };
     const data = await stateService.getState();
     if (data.doors.some((door) => door.name === name)) throw new Error(`A door named '${name}' already exists.`);
@@ -197,6 +244,7 @@ export function createApp(stateService: StateService = defaultStateService): Hon
   app.get("/commands/door/list", async (c) => c.json((await stateService.getState()).doors));
   app.get("/commands/door/:name", async (c) => c.json(requireItem((await stateService.getState()).doors, (d) => d.name === c.req.param("name"), `No door named '${c.req.param("name")}' exists.`)));
   app.post("/commands/door/:name", async (c) => {
+    console.log(`[action] update door ${c.req.param("name")}`);
     const { name } = (await c.req.json()) as { name: string };
     const data = await stateService.getState();
     const door = requireItem(data.doors, (d) => d.name === c.req.param("name"), `No door named '${c.req.param("name")}' exists.`);
@@ -204,6 +252,7 @@ export function createApp(stateService: StateService = defaultStateService): Hon
     return c.json(await stateService.saveState(data));
   });
   app.delete("/commands/door/:name", async (c) => {
+    console.log(`[action] delete door ${c.req.param("name")}`);
     const data = await stateService.getState();
     const next = data.doors.filter((door) => door.name !== c.req.param("name"));
     if (next.length === data.doors.length) throw new Error(`No door named '${c.req.param("name")}' exists.`);
@@ -214,6 +263,7 @@ export function createApp(stateService: StateService = defaultStateService): Hon
   app.get("/commands/module/list", async (c) => c.json((await stateService.getState()).modules));
   app.get("/commands/module/status", async (c) => c.json((await stateService.getState()).modules));
   app.post("/commands/module/normalize-names", async (c) => {
+    console.log("[action] normalize module names");
     const data = await stateService.getState();
     data.modules = normalizeModuleNames(data.modules);
     const moduleIds = new Map(data.modules.map((module) => [module.id, module.name]));
@@ -224,6 +274,7 @@ export function createApp(stateService: StateService = defaultStateService): Hon
   app.post("/commands/module/create", async (c) => c.json(await runConstructCommand({ stateService, ...(await c.req.json()) as any })));
   app.get("/commands/module/:name", async (c) => c.json(requireItem((await stateService.getState()).modules, (m) => m.name === c.req.param("name") || m.id === c.req.param("name") || m.displayName === c.req.param("name"), `No module named '${c.req.param("name")}' exists.`)));
   app.post("/commands/module/:name", async (c) => {
+    console.log(`[action] update module ${c.req.param("name")}`);
     const body = (await c.req.json()) as { name?: string; status?: string };
     const data = await stateService.getState();
     const module = requireItem(data.modules, (m) => m.name === c.req.param("name") || m.id === c.req.param("name") || m.displayName === c.req.param("name"), `No module named '${c.req.param("name")}' exists.`);
@@ -232,16 +283,19 @@ export function createApp(stateService: StateService = defaultStateService): Hon
     return c.json(await stateService.saveState(data));
   });
   app.delete("/commands/module/:name", async (c) => {
+    console.log(`[action] delete module ${c.req.param("name")}`);
     const data = await stateService.getState();
     data.modules = data.modules.filter((module) => module.displayName !== c.req.param("name"));
     return c.json(await stateService.saveState(data));
   });
 
   app.get("/commands/debug/battery-drain", async (c) => {
+    console.log("[action] inspect battery drain");
     const data = await stateService.getState();
     return c.json(data.modules.filter((module) => isBattery(module as never)).map((module) => ({ name: module.displayName, chargeLossPerTickMult: typeof module.runtimeAttributes.chargeLossPerTickMult === "number" ? module.runtimeAttributes.chargeLossPerTickMult : 1, drain: batteryConstructionDrainPerTick(module as never) })));
   });
   app.post("/commands/debug/recharge-batteries", async (c) => {
+    console.log("[action] recharge batteries");
     const data = await stateService.getState();
     let count = 0;
     for (const module of data.modules) {
