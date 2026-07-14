@@ -1,0 +1,16 @@
+[Unit]
+Description=OpenClaw connected to Habitat
+After=network-online.target habitat.service
+Wants=network-online.target
+Requires=habitat.service
+
+[Service]
+Type=simple
+WorkingDirectory=/home/ediefalco/labs/habitat
+EnvironmentFile=/etc/openclaw/habitat.env
+ExecStart=/usr/local/bin/openclaw
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
