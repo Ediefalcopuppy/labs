@@ -286,6 +286,24 @@ export async function fetchKeplerHabitatRegistration(habitatId: string): Promise
   return normalizeKeplerHabitat(payload.habitat);
 }
 
+export async function fetchKeplerWorldScan(params: {
+  habitatId: string;
+  x: number;
+  y: number;
+  sensorStrength: number;
+  radiusTiles: number;
+}): Promise<unknown> {
+  const search = new URLSearchParams({
+    habitatId: params.habitatId,
+    x: String(params.x),
+    y: String(params.y),
+    sensorStrength: String(params.sensorStrength),
+    radiusTiles: String(params.radiusTiles),
+  });
+
+  return fetchKeplerJson(`/world/scan?${search.toString()}`, "habitat resource scan");
+}
+
 export async function refreshKeplerBlueprintCatalog(): Promise<KeplerBlueprintCatalogEntry[]> {
   return fetchKeplerBlueprintCatalog();
 }

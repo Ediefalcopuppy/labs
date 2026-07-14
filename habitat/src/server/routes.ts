@@ -4,7 +4,7 @@ import { batteryConstructionDrainPerTick, BATTERY_MAX_CHARGE } from "../construc
 import { runConstructCommand, runInventorySetCommand, runModuleSetStatusCommand, runTickCommand } from "../domain/commands";
 import { spendInventoryMaterials } from "../domain/inventory";
 import { normalizeModuleNames } from "../domain/modules";
-import { fetchKeplerBlueprintCatalog, fetchKeplerHabitatRegistration, fetchKeplerResourceCatalog, fetchKeplerSolarIrradiance } from "../kepler/service";
+import { fetchKeplerBlueprintCatalog, fetchKeplerHabitatRegistration, fetchKeplerResourceCatalog, fetchKeplerSolarIrradiance, fetchKeplerWorldScan } from "../kepler/service";
 import { registerHealthRoute } from "./health";
 import { createStateService, type StateService, normalizeState } from "../state/service";
 
@@ -31,6 +31,24 @@ function isBattery(module: { capabilities: string[]; runtimeAttributes: Record<s
     module.runtimeAttributes.isBattery === true ||
     module.blueprintId === "battery-bank"
   );
+}
+
+function parseFiniteNumber(value: unknown, fieldName: string): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    throw new Error(`${fieldName} must be a finite number.`);
+  }
+  return value;
+}
+
+function parseIntegerInRange(value: unknown, fieldName: string, min: number, max: number): number {
+  const parsed = parseFiniteNumber(value, fieldName);
+  if (!Number.isInteger(parsed)) {
+    throw new Error(`${fieldName} must be an integer.`);
+  }
+  if (parsed < min || parsed > max) {
+    throw new Error(`${fieldName} must be between ${min} and ${max}.`);
+  }
+  return parsed;
 }
 
 export function createApp(stateService: StateService = defaultStateService): Hono {
@@ -136,6 +154,30 @@ export function createApp(stateService: StateService = defaultStateService): Hon
   app.get("/commands/resource/list", async (c) => {
     console.log("[action] list resources");
     return c.json(await fetchKeplerResourceCatalog());
+  });
+  app.post("/commands/resource/scan", async (c) => {
+    console.log("[action] scan resources");
+    const body = (await c.req.json()) as {
+      x: unknown;
+      y: unknown;
+      sensorStrength: unknown;
+      radiusTiles?: unknown;
+      radius?: unknown;
+    };
+    const registration = (await stateService.getState()).registration;
+    if (!registration?.habitatId) {
+      throw new Error("Habitat registration must include a habitatId before resource scanning.");
+    }
+
+    const scan = await fetchKeplerWorldScan({
+      habitatId: registration.habitatId,
+      x: parseIntegerInRange(body.x, "x", Number.MIN_SAFE_INTEGER, Number.MAX_SAFE_INTEGER),
+      y: parseIntegerInRange(body.y, "y", Number.MIN_SAFE_INTEGER, Number.MAX_SAFE_INTEGER),
+      sensorStrength: parseIntegerInRange(body.sensorStrength, "sensorStrength", 0, 100),
+      radiusTiles: parseIntegerInRange(body.radiusTiles ?? body.radius ?? 0, "radiusTiles", 0, 5),
+    });
+
+    return c.json(scan);
   });
 
   app.get("/commands/inventory/list", async (c) => c.json((await stateService.getState()).inventory));

@@ -4,7 +4,7 @@ import { Command, InvalidArgumentError } from "commander";
 import { randomUUID } from "node:crypto";
 import { copyFile, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { getBackendCommand, getBackendState, saveBackendState } from "./client";
+import { getBackendCommand, getBackendState, postBackendCommand, saveBackendState } from "./client";
 import { normalizeState } from "./state/service";
 import { readJsonFile, readSqliteState, writeSqliteState } from "./storage";
 import type {
@@ -628,6 +628,26 @@ function parseTickCount(value: string): number {
   }
 
   return tickCount;
+}
+
+function parseInteger(value: string, fieldName: string): number {
+  const parsed = Number(value);
+
+  if (!Number.isInteger(parsed)) {
+    throw new InvalidArgumentError(`${fieldName} must be a whole number.`);
+  }
+
+  return parsed;
+}
+
+function parseIntegerInRange(value: string, fieldName: string, min: number, max: number): number {
+  const parsed = parseInteger(value, fieldName);
+
+  if (parsed < min || parsed > max) {
+    throw new InvalidArgumentError(`${fieldName} must be between ${min} and ${max}.`);
+  }
+
+  return parsed;
 }
 
 function parseInventoryAmount(value: string): number {
@@ -2071,6 +2091,32 @@ resourceCommand
     }
   });
 
+resourceCommand
+  .command("scan")
+  .description("Scan the world through the backend.")
+  .requiredOption("--x <integer>", "current x coordinate", (value) => parseInteger(value, "x"))
+  .requiredOption("--y <integer>", "current y coordinate", (value) => parseInteger(value, "y"))
+  .requiredOption("--strength <0-100>", "effective sensor strength", (value) =>
+    parseIntegerInRange(value, "strength", 0, 100),
+  )
+  .option("--radius <0-5>", "scan radius, default 0", (value) => parseIntegerInRange(value, "radius", 0, 5), 0)
+  .option("--json", "print the complete JSON response")
+  .action(async (options: { x: number; y: number; strength: number; radius: number; json?: boolean }) => {
+    const scan = await postBackendCommand<unknown>("/commands/resource/scan", {
+      x: options.x,
+      y: options.y,
+      sensorStrength: options.strength,
+      radius: options.radius,
+    });
+
+    if (options.json) {
+      console.log(JSON.stringify(scan, null, 2));
+      return;
+    }
+
+    console.log(JSON.stringify(scan, null, 2));
+  });
+
 resourceCommand.on("command:*", ([command]) => {
   resourceCommand.error(`Habitat does not know the resource command '${command}'.`, {
     code: "commander.unknownCommand",
@@ -2078,6 +2124,33 @@ resourceCommand.on("command:*", ([command]) => {
 });
 
 program.addCommand(resourceCommand);
+
+const scanCommand = new Command("scan")
+  .description("Scan the world through the backend.")
+  .requiredOption("--x <integer>", "current x coordinate", (value) => parseInteger(value, "x"))
+  .requiredOption("--y <integer>", "current y coordinate", (value) => parseInteger(value, "y"))
+  .requiredOption("--strength <0-100>", "effective sensor strength", (value) =>
+    parseIntegerInRange(value, "strength", 0, 100),
+  )
+  .option("--radius <0-5>", "scan radius, default 0", (value) => parseIntegerInRange(value, "radius", 0, 5), 0)
+  .option("--json", "print the complete JSON response")
+  .action(async (options: { x: number; y: number; strength: number; radius: number; json?: boolean }) => {
+    const scan = await postBackendCommand<unknown>("/commands/resource/scan", {
+      x: options.x,
+      y: options.y,
+      sensorStrength: options.strength,
+      radius: options.radius,
+    });
+
+    if (options.json) {
+      console.log(JSON.stringify(scan, null, 2));
+      return;
+    }
+
+    console.log(JSON.stringify(scan, null, 2));
+  });
+
+program.addCommand(scanCommand);
 
 const inventoryCommand = new Command("inventory")
   .description("Manage habitat inventory.")
