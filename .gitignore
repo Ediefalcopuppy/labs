@@ -3,3 +3,4 @@
 .DS_Store
 habitat/.env
 habitat/.env
+habitat/src/server-keys.sh
