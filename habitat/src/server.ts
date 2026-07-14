@@ -1,4 +1,5 @@
 import { serve } from "bun";
+import "./load-env";
 import { createApp } from "./server/routes";
 
 export { createApp } from "./server/routes";

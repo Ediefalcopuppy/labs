@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import "./load-env";
 import { Command, InvalidArgumentError } from "commander";
 import { randomUUID } from "node:crypto";
 import { copyFile, readFile, writeFile } from "node:fs/promises";
