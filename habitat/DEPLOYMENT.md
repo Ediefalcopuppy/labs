@@ -79,5 +79,5 @@ The checkout keeps `.env` and `.habitat/habitat.sqlite` around so local developm
 
 ## Server-specific paths
 
-- Habitat checkout: `/home/ediefalco/labs/habitat`
+- Habitat checkout: `~/labs/habitat`
 - OpenClaw executable: `/usr/local/bin/openclaw`
