@@ -1,4 +1,4 @@
-const backendBaseUrl = process.env.HABITAT_BACKEND_URL ?? "http://127.0.0.1:3000";
+const backendBaseUrl = process.env.HABITAT_API_BASE_URL ?? process.env.HABITAT_BACKEND_URL ?? "http://127.0.0.1:3000";
 
 export type { KeplerBlueprintCatalogEntry, KeplerHabitat, KeplerResourceCatalogEntry } from "./kepler/service";
 

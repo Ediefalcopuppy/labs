@@ -1,7 +1,7 @@
 const defaultBackendUrl = "http://127.0.0.1:3000";
 
 export function buildBackendUrl(): string {
-  return process.env.HABITAT_BACKEND_URL ?? defaultBackendUrl;
+  return process.env.HABITAT_API_BASE_URL ?? process.env.HABITAT_BACKEND_URL ?? defaultBackendUrl;
 }
 
 async function requestBackendJson(path: string, init?: RequestInit): Promise<unknown> {
