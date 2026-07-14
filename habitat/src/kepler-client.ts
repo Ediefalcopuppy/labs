@@ -1,9 +1,11 @@
-const backendBaseUrl = process.env.HABITAT_API_BASE_URL ?? process.env.HABITAT_BACKEND_URL ?? "http://127.0.0.1:3000";
+function resolveBackendUrl(): string {
+  return process.env.HABITAT_API_BASE_URL ?? process.env.HABITAT_BACKEND_URL ?? "http://127.0.0.1:3000";
+}
 
 export type { KeplerBlueprintCatalogEntry, KeplerHabitat, KeplerResourceCatalogEntry } from "./kepler/service";
 
 async function fetchBackendJson(path: string): Promise<unknown> {
-  const response = await fetch(`${backendBaseUrl}${path}`);
+  const response = await fetch(`${resolveBackendUrl()}${path}`);
   if (!response.ok) {
     throw new Error(`Failed to fetch Habitat backend data: ${response.status} ${response.statusText}.`);
   }
