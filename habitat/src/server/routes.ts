@@ -1,9 +1,11 @@
 import { randomUUID } from "node:crypto";
+import { join } from "node:path";
 import { Hono } from "hono";
 import { batteryConstructionDrainPerTick, BATTERY_MAX_CHARGE } from "../construction";
 import { runConstructCommand, runInventorySetCommand, runModuleSetStatusCommand, runTickCommand } from "../domain/commands";
 import { spendInventoryMaterials } from "../domain/inventory";
 import { normalizeModuleNames } from "../domain/modules";
+import { readJsonFile, writeSqliteState } from "../storage";
 import { fetchKeplerBlueprintCatalog, fetchKeplerHabitatRegistration, fetchKeplerResourceCatalog, fetchKeplerSolarIrradiance, fetchKeplerWorldScan } from "../kepler/service";
 import { registerHealthRoute } from "./health";
 import { createStateService, type StateService, normalizeState } from "../state/service";
@@ -349,6 +351,28 @@ export function createApp(stateService: StateService = defaultStateService): Hon
     }
     await stateService.saveState(data);
     return c.json({ count });
+  });
+
+  app.post("/commands/storage/sqlite", async (c) => {
+    const state = await stateService.getState();
+    await writeSqliteState(join(process.cwd(), ".habitat", "habitat.sqlite"), state);
+    return c.json({ restored: false, message: "SQLite state rebuilt from the current habitat state." });
+  });
+  app.post("/commands/storage/restore", async (c) => {
+    const backupPath = join(process.cwd(), ".habitat", "data.json.backup");
+    const backup = await readJsonFile(backupPath);
+    return c.json(await stateService.saveState(normalizeState(backup)));
+  });
+
+  // Serve the Vite production bundle when it exists. API routes above remain the source of truth.
+  app.get("/*", async (c) => {
+    const pathname = new URL(c.req.url).pathname;
+    const assetPath = pathname === "/" || !pathname.includes(".")
+      ? join(process.cwd(), "web", "dist", "index.html")
+      : join(process.cwd(), "web", "dist", pathname.slice(1));
+    const file = Bun.file(assetPath);
+    if (await file.exists()) return new Response(file);
+    return c.notFound();
   });
 
   return app;
