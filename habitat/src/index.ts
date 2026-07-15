@@ -660,6 +660,207 @@ function parseInventoryAmount(value: string): number {
   return amount;
 }
 
+const color = {
+  reset: "\u001b[0m",
+  bold: "\u001b[1m",
+  cyan: "\u001b[36m",
+  green: "\u001b[32m",
+  yellow: "\u001b[33m",
+  magenta: "\u001b[35m",
+  dim: "\u001b[2m",
+};
+
+const useColor = Boolean(process.stdout.isTTY) && process.env.NO_COLOR === undefined;
+
+function paint(text: string, ...styles: string[]): string {
+  if (!useColor || styles.length === 0) {
+    return text;
+  }
+
+  return `${styles.join("")}${text}${color.reset}`;
+}
+
+function formatScanResult(scan: unknown): string[] {
+  if (!scan || typeof scan !== "object") {
+    return [paint(JSON.stringify(scan, null, 2), color.dim)];
+  }
+
+  const payload = scan as {
+    tiles?: Array<{
+      x?: number;
+      y?: number;
+      terrain?: string;
+      distance?: number;
+      deposits?: unknown[];
+      candidates?: unknown[];
+      resourceProbabilities?: unknown[];
+      resources?: unknown[];
+      resourceCandidates?: unknown[];
+      topCandidate?: { resourceId?: string; displayName?: string; probability?: number };
+      quantityEstimate?: {
+        candidate?: string;
+        kilograms?: number;
+        estimatedValue?: number;
+        minimumValue?: number;
+        maximumValue?: number;
+        exact?: boolean;
+      } | null;
+    }>;
+    habitatId?: string;
+    sensorStrength?: number;
+    radiusTiles?: number;
+    radius?: number;
+  };
+
+  const lines: string[] = [];
+  if (typeof payload.habitatId === "string") {
+    lines.push(`${paint("Habitat id:", color.bold, color.cyan)} ${paint(payload.habitatId, color.green)}`);
+  }
+  if (typeof payload.sensorStrength === "number") {
+    lines.push(
+      `${paint("Sensor strength:", color.bold, color.cyan)} ${paint(String(payload.sensorStrength), color.green)}`,
+    );
+  }
+  if (typeof payload.radiusTiles === "number") {
+    lines.push(`${paint("Radius:", color.bold, color.cyan)} ${paint(String(payload.radiusTiles), color.green)}`);
+  } else if (typeof payload.radius === "number") {
+    lines.push(`${paint("Radius:", color.bold, color.cyan)} ${paint(String(payload.radius), color.green)}`);
+  }
+  if (Array.isArray(payload.tiles)) {
+    lines.push(`${paint("Tiles:", color.bold, color.cyan)} ${paint(String(payload.tiles.length), color.green)}`);
+    for (const tile of payload.tiles) {
+      const tileLabel = `${tile.x ?? "?"},${tile.y ?? "?"}`;
+      const terrain = tile.terrain ?? "unknown terrain";
+      const distance = typeof tile.distance === "number" ? `distance ${tile.distance}` : "distance ?";
+      const candidate = tile.topCandidate?.displayName ?? tile.topCandidate?.resourceId ?? "no candidate";
+      const probability =
+        typeof tile.topCandidate?.probability === "number"
+          ? ` (${Math.round(tile.topCandidate.probability * 100)}%)`
+          : "";
+      lines.push(
+        `${paint("- [" + tileLabel + "]", color.magenta)} ${paint(terrain, color.green)}, ${paint(distance, color.yellow)}, ${paint("top candidate:", color.bold, color.cyan)} ${paint(candidate, color.green)}${paint(probability, color.dim)}`,
+      );
+
+      const deposits = extractScanDeposits(tile);
+      if (deposits.length > 0) {
+        lines.push(`${paint("  deposits:", color.bold, color.cyan)}`);
+        for (const deposit of deposits) {
+          lines.push(`    ${formatDepositLine(deposit)}`);
+        }
+      }
+
+      if (tile.quantityEstimate) {
+        const estimate = tile.quantityEstimate;
+        const candidateName = estimate.candidate ?? "unknown";
+        const kilograms = typeof estimate.kilograms === "number" ? `${estimate.kilograms} kg` : "unknown kg";
+        const valueRange =
+          typeof estimate.minimumValue === "number" && typeof estimate.maximumValue === "number"
+            ? `${estimate.minimumValue}..${estimate.maximumValue}`
+            : "unknown";
+        const estimatedValue =
+          typeof estimate.estimatedValue === "number" ? `${estimate.estimatedValue}` : "unknown";
+        lines.push(
+          `${paint("  estimate:", color.bold, color.cyan)} ${paint(candidateName, color.green)}, ${paint(kilograms, color.green)}, ${paint("value", color.bold, color.cyan)} ${paint(estimatedValue, color.yellow)}, ${paint("range", color.bold, color.cyan)} ${paint(valueRange, color.yellow)}, ${paint("exact", color.bold, color.cyan)} ${paint(estimate.exact ? "yes" : "no", estimate.exact ? color.green : color.yellow)}`,
+        );
+      }
+    }
+    return lines;
+  }
+
+  return formatObjectLines(scan);
+}
+
+function extractScanDeposits(tile: {
+  deposits?: unknown[];
+  candidates?: unknown[];
+  resourceProbabilities?: unknown[];
+  resources?: unknown[];
+  resourceCandidates?: unknown[];
+}): unknown[] {
+  const candidates = [
+    tile.deposits,
+    tile.candidates,
+    tile.resourceProbabilities,
+    tile.resources,
+    tile.resourceCandidates,
+  ];
+
+  for (const entry of candidates) {
+    if (Array.isArray(entry) && entry.length > 0) {
+      return entry;
+    }
+  }
+
+  return [];
+}
+
+function formatDepositLine(deposit: unknown): string {
+  if (!deposit || typeof deposit !== "object") {
+    return String(deposit);
+  }
+
+  const record = deposit as Record<string, unknown>;
+  const label =
+    typeof record.displayName === "string"
+      ? record.displayName
+      : typeof record.resourceId === "string"
+        ? record.resourceId
+        : typeof record.name === "string"
+          ? record.name
+          : "unknown";
+  const probability =
+    typeof record.probability === "number"
+      ? ` (${Math.round(record.probability * 100)}%)`
+      : typeof record.chance === "number"
+        ? ` (${Math.round(record.chance * 100)}%)`
+        : "";
+  const quantity =
+    typeof record.kilograms === "number"
+      ? `, ${record.kilograms} kg`
+      : typeof record.quantity === "number"
+        ? `, ${record.quantity}`
+        : "";
+  const exact =
+    typeof record.exact === "boolean"
+      ? `, exact ${record.exact ? "yes" : "no"}`
+      : "";
+
+  return `${paint(label, color.green)}${paint(probability, color.dim)}${paint(quantity, color.yellow)}${paint(exact, color.cyan)}`;
+}
+
+function formatObjectLines(value: unknown, indent = 0): string[] {
+  const padding = " ".repeat(indent);
+
+  if (Array.isArray(value)) {
+    const lines: string[] = [];
+    for (const item of value) {
+      if (item && typeof item === "object") {
+        lines.push(`${padding}${paint("-", color.magenta)}`);
+        lines.push(...formatObjectLines(item, indent + 2));
+      } else {
+        lines.push(`${padding}${paint("-", color.magenta)} ${String(item)}`);
+      }
+    }
+    return lines;
+  }
+
+  if (!value || typeof value !== "object") {
+    return [`${padding}${String(value)}`];
+  }
+
+  const lines: string[] = [];
+  for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+    if (entry && typeof entry === "object") {
+      lines.push(`${padding}${paint(key + ":", color.bold, color.cyan)}`);
+      lines.push(...formatObjectLines(entry, indent + 2));
+    } else {
+      lines.push(`${padding}${paint(key + ":", color.bold, color.cyan)} ${String(entry)}`);
+    }
+  }
+
+  return lines;
+}
+
 const program = new Command();
 
 program
@@ -2114,7 +2315,9 @@ resourceCommand
       return;
     }
 
-    console.log(JSON.stringify(scan, null, 2));
+    for (const line of formatScanResult(scan)) {
+      console.log(line);
+    }
   });
 
 resourceCommand.on("command:*", ([command]) => {
@@ -2147,7 +2350,9 @@ const scanCommand = new Command("scan")
       return;
     }
 
-    console.log(JSON.stringify(scan, null, 2));
+    for (const line of formatScanResult(scan)) {
+      console.log(line);
+    }
   });
 
 program.addCommand(scanCommand);

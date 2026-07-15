@@ -93,8 +93,8 @@ export async function runTickCommand(params: {
   let pausedConstructionTicks = 0;
   let energyCost = 0;
   const getIrradiance = params.getIrradiance ?? fetchKeplerSolarIrradiance;
+  const irradiance = await getIrradiance();
   for (let step = 0; step < params.count; step += 1) {
-    const irradiance = await getIrradiance();
     const result = advanceConstructionTick(data, irradiance);
     energyCost += result.energyCost;
     advancedConstructionTicks += result.advancedConstructionTicks;
