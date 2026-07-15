@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import { buildCommandRequest, getCommandById } from "../web/src/commands";
 import { routeFromHash, viewToHash } from "../web/src/routes";
+import { constructionProgress, materialEntries } from "../web/src/ui-format";
 
 describe("web routes", () => {
   test("round-trips a view through the hash route", () => {
@@ -41,6 +42,24 @@ describe("command requests", () => {
       y: 4,
       sensorStrength: 70,
       radiusTiles: 2,
+    });
+  });
+});
+
+describe("live page formatting", () => {
+  test("ignores malformed blueprint material values instead of throwing", () => {
+    expect(materialEntries({ steel: "12", water: 0, invalid: { amount: 4 }, broken: "nope" })).toEqual([
+      ["steel", 12],
+    ]);
+  });
+
+  test("formats construction progress for people rather than raw ratios", () => {
+    expect(constructionProgress({ remainingBuildTicks: 1, totalBuildTicks: 10 })).toEqual({
+      remaining: 1,
+      total: 10,
+      completed: 9,
+      percent: 90,
+      label: "1 tick remaining",
     });
   });
 });
