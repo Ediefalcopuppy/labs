@@ -164,4 +164,12 @@ document.addEventListener("pointerdown", (event) => {
   target.appendChild(pulse);
   pulse.addEventListener("animationend", () => pulse.remove(), { once: true });
 });
+document.addEventListener("pointerdown", (event) => {
+  const target = event.target instanceof Node ? event.target : null;
+  const accountMenu = document.querySelector("#account-menu");
+  const accountButton = document.querySelector("#account-button");
+  if (accountMenu && target && !accountMenu.contains(target) && !accountButton?.contains(target)) accountMenu.remove();
+  const modal = document.querySelector<HTMLElement>(".modal-backdrop");
+  if (modal && target === modal) modal.remove();
+});
 refresh().catch((error) => { apiOnline = false; toast(error instanceof Error ? error.message : String(error)); render(); });
