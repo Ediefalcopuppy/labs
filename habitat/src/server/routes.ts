@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
+import { createAuthService, type User, type UserRole } from "../auth";
 import { batteryConstructionDrainPerTick, BATTERY_MAX_CHARGE } from "../construction";
 import { runConstructCommand, runDebugConstructCommand, runInventorySetCommand, runModuleSetStatusCommand, runTickCommand } from "../domain/commands";
 import { spendInventoryMaterials } from "../domain/inventory";
@@ -11,6 +12,11 @@ import { registerHealthRoute } from "./health";
 import { createStateService, type StateService, normalizeState } from "../state/service";
 
 const defaultStateService = createStateService({ storagePath: ".habitat/habitat.sqlite" });
+const defaultAuthService = createAuthService(".habitat/habitat.sqlite");
+
+class HttpError extends Error {
+  constructor(public status: 401 | 403, message: string) { super(message); }
+}
 
 function requireItem<T>(items: T[], predicate: (item: T) => boolean, message: string): T {
   const found = items.find(predicate);
@@ -55,8 +61,10 @@ function parseIntegerInRange(value: unknown, fieldName: string, min: number, max
 
 export function createApp(stateService: StateService = defaultStateService): Hono {
   const app = new Hono();
+  const authService = defaultAuthService;
   registerHealthRoute(app);
   app.onError((error, c) => {
+    if (error instanceof HttpError) return c.json({ error: error.status === 401 ? "Authentication required" : "Admin access required", message: error.message }, error.status);
     console.error(`[error] ${c.req.method} ${new URL(c.req.url).pathname}: ${error.message}`);
     return c.json({ error: "Habitat request failed", message: error.message }, 500);
   });
@@ -66,6 +74,32 @@ export function createApp(stateService: StateService = defaultStateService): Hon
     await next();
     console.log(`[response] ${c.req.method} ${new URL(c.req.url).pathname} ${c.res.status} ${Date.now() - startedAt}ms`);
   });
+
+  const currentUser = (request: Request): User | undefined => authService.getUserFromRequest(request);
+  const requireAdmin = (c: Context): User => {
+    const user = currentUser(c.req.raw);
+    if (!user) throw new HttpError(401, "Sign in to continue.");
+    if (user.role !== "admin") throw new HttpError(403, "This action is only available to admins.");
+    return user;
+  };
+
+  app.post("/auth/signup", async (c) => {
+    const user = await authService.signup(await c.req.json());
+    const token = authService.createSession(user);
+    return c.json({ user }, 201, { "set-cookie": authService.cookie(token) });
+  });
+  app.post("/auth/login", async (c) => {
+    const user = await authService.login(await c.req.json());
+    const token = authService.createSession(user);
+    return c.json({ user }, 200, { "set-cookie": authService.cookie(token) });
+  });
+  app.post("/auth/logout", async (c) => {
+    authService.clearSession(c.req.raw);
+    return c.json({ ok: true }, 200, { "set-cookie": authService.expiredCookie() });
+  });
+  app.get("/auth/me", (c) => c.json({ user: currentUser(c.req.raw) ?? null }));
+  app.get("/admin/users", async (c) => { requireAdmin(c); return c.json(await authService.listUsers()); });
+  app.post("/admin/users/:username/role", async (c) => { requireAdmin(c); const body = await c.req.json() as { role?: UserRole }; return c.json(await authService.setRole(c.req.param("username"), body.role ?? "user")); });
 
   app.get("/state", async (c) => c.json(await stateService.getState()));
   app.post("/state", async (c) => {
@@ -205,6 +239,7 @@ export function createApp(stateService: StateService = defaultStateService): Hon
     return c.json(await runConstructCommand({ stateService, ...(await c.req.json()) as { blueprintId: string; displayName?: string; moduleName?: string } }));
   });
   app.post("/commands/debug/construct", async (c) => {
+    requireAdmin(c);
     console.log("[action] force construct from blueprint");
     return c.json(await runDebugConstructCommand({ stateService, ...(await c.req.json()) as { blueprintId: string; displayName?: string; moduleName?: string } }));
   });
@@ -345,11 +380,13 @@ export function createApp(stateService: StateService = defaultStateService): Hon
   });
 
   app.get("/commands/debug/battery-drain", async (c) => {
+    requireAdmin(c);
     console.log("[action] inspect battery drain");
     const data = await stateService.getState();
     return c.json(data.modules.filter((module) => isBattery(module as never)).map((module) => ({ name: module.displayName, chargeLossPerTickMult: typeof module.runtimeAttributes.chargeLossPerTickMult === "number" ? module.runtimeAttributes.chargeLossPerTickMult : 1, drain: batteryConstructionDrainPerTick(module as never) })));
   });
   app.post("/commands/debug/recharge-batteries", async (c) => {
+    requireAdmin(c);
     console.log("[action] recharge batteries");
     const data = await stateService.getState();
     let count = 0;
@@ -365,11 +402,13 @@ export function createApp(stateService: StateService = defaultStateService): Hon
   });
 
   app.post("/commands/storage/sqlite", async (c) => {
+    requireAdmin(c);
     const state = await stateService.getState();
     await writeSqliteState(join(process.cwd(), ".habitat", "habitat.sqlite"), state);
     return c.json({ restored: false, message: "SQLite state rebuilt from the current habitat state." });
   });
   app.post("/commands/storage/restore", async (c) => {
+    requireAdmin(c);
     const backupPath = join(process.cwd(), ".habitat", "data.json.backup");
     const backup = await readJsonFile(backupPath);
     return c.json(await stateService.saveState(normalizeState(backup)));
