@@ -202,11 +202,11 @@ export function createApp(stateService: StateService = defaultStateService): Hon
 
   app.post("/commands/construct", async (c) => {
     console.log("[action] construct from blueprint");
-    return c.json(await runConstructCommand({ stateService, ...(await c.req.json()) as { blueprintId: string; displayName?: string; moduleName?: string; dryRun?: boolean } }));
+    return c.json(await runConstructCommand({ stateService, ...(await c.req.json()) as { blueprintId: string; displayName?: string; moduleName?: string } }));
   });
   app.post("/commands/module/create", async (c) => {
     console.log("[action] create module from blueprint");
-    return c.json(await runConstructCommand({ stateService, ...(await c.req.json()) as { blueprintId: string; displayName?: string; moduleName?: string; dryRun?: boolean } }));
+    return c.json(await runConstructCommand({ stateService, ...(await c.req.json()) as { blueprintId: string; displayName?: string; moduleName?: string } }));
   });
   app.post("/commands/module/set-status", async (c) => {
     console.log("[action] set module status");

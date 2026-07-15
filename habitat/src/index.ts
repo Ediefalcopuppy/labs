@@ -37,7 +37,6 @@ import {
   forceConstructionStart,
   normalizeModuleNames,
   planConstructionStart,
-  previewConstructionStart,
   spendConstructionPower,
   solarGeneratedChargePerTick,
 } from "./construction";
@@ -1226,7 +1225,6 @@ program
   .description("Start construction from a live Kepler blueprint through the backend.")
   .argument("<blueprint-id>", "published blueprint id")
   .option("-d, --display-name <displayName>", "visible module display name")
-  .option("--dry-run", "check whether construction can start without changing local files")
   .addHelpText(
     "after",
     `
@@ -1236,7 +1234,7 @@ Examples:
   habitat construct greenhouse
 `,
   )
-  .action(async (blueprintId: string, options: { dryRun?: boolean; displayName?: string }) => {
+  .action(async (blueprintId: string, options: { displayName?: string }) => {
     const data = await readData();
 
     const blueprints = await fetchKeplerBlueprintCatalog();
@@ -1247,24 +1245,6 @@ Examples:
     if (!blueprint) {
       program.error(`No blueprint with id '${blueprintId}' exists in Kepler.`);
       throw new Error("Unreachable after Commander exits.");
-    }
-
-    const report = previewConstructionStart({
-      blueprint,
-      habitat: data,
-      displayName: options.displayName ?? blueprint.displayName,
-    });
-
-    if (options.dryRun) {
-      console.log(`Required facility exists: ${report.requiredFacilityExists ? "yes" : "no"}`);
-      console.log(`Fabricator available: ${report.fabricatorAvailable ? "yes" : "no"}`);
-      console.log(`Supply cache online: ${report.supplyCacheOnline ? "yes" : "no"}`);
-      console.log(`Prerequisites met: ${report.prerequisitesMet ? "yes" : "no"}`);
-      console.log(`Inventory has required resources: ${report.inventoryHasMaterials ? "yes" : "no"}`);
-      console.log(`Module to be created: ${report.moduleToBeCreated}`);
-      console.log(`Resources to be spent: ${JSON.stringify(report.resourcesToBeSpent)}`);
-      console.log(`Construction can start: ${report.canStart ? "yes" : "no"}`);
-      return;
     }
 
     if (data.constructionJobs.some((job) => job.blueprintId === blueprintId)) {

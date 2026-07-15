@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { StateService } from "../state/service";
 import { fetchKeplerBlueprintCatalog, fetchKeplerSolarIrradiance } from "../kepler/service";
 import { spendInventoryMaterials } from "./inventory";
-import { planConstructionStart, previewConstructionStart, advanceConstructionTick } from "./construction";
+import { planConstructionStart, advanceConstructionTick } from "./construction";
 import { setModuleStatus } from "./modules";
 
 export async function runConstructCommand(params: {
@@ -10,7 +10,6 @@ export async function runConstructCommand(params: {
   blueprintId: string;
   displayName?: string;
   moduleName?: string;
-  dryRun?: boolean;
   getBlueprints?: typeof fetchKeplerBlueprintCatalog;
 }): Promise<unknown> {
   const data = await params.stateService.getState();
@@ -22,17 +21,6 @@ export async function runConstructCommand(params: {
 
   if (!blueprint) {
     throw new Error(`No blueprint with id '${params.blueprintId}' exists in Kepler.`);
-  }
-
-  const report = previewConstructionStart({
-    blueprint,
-    habitat: data,
-    displayName: params.displayName ?? blueprint.displayName,
-    moduleName: params.moduleName,
-  });
-
-  if (params.dryRun) {
-    return report;
   }
 
   const plan = planConstructionStart({
