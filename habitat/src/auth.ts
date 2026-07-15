@@ -28,6 +28,11 @@ function rowToUser(row: { username: string; role: string; created_at: string }):
   return { username: row.username, role: row.role === "admin" ? "admin" : "user", createdAt: row.created_at };
 }
 
+function isBootstrapAdmin(username: string): boolean {
+  const configured = process.env.HABITAT_ADMIN_USERNAME ?? process.env.HABITAT_BOOTSTRAP_ADMIN_USERNAME;
+  return Boolean(configured && configured.trim().toLowerCase() === username.toLowerCase());
+}
+
 export function createAuthService(storagePath: string) {
   async function withDatabase<T>(operation: (db: Database) => T): Promise<T> {
     await mkdir(dirname(storagePath), { recursive: true });
@@ -36,10 +41,15 @@ export function createAuthService(storagePath: string) {
   }
 
   async function findUser(username: string): Promise<User | undefined> {
-    return withDatabase((db) => {
+    const user = await withDatabase((db) => {
       const row = db.query<{ username: string; role: string; created_at: string }, [string]>("SELECT username, role, created_at FROM habitat_users WHERE username = ?").get(username);
       return row ? rowToUser(row) : undefined;
     });
+    if (user && isBootstrapAdmin(user.username) && user.role !== "admin") {
+      await withDatabase((db) => db.query("UPDATE habitat_users SET role = 'admin' WHERE username = ?").run(user.username));
+      return { ...user, role: "admin" };
+    }
+    return user;
   }
 
   return {
@@ -47,7 +57,7 @@ export function createAuthService(storagePath: string) {
       const username = normalizeUsername((input as { username?: unknown })?.username);
       const existing = await findUser(username);
       if (existing) throw new Error(`Username '${username}' is already registered.`);
-      const role: UserRole = username === process.env.HABITAT_ADMIN_USERNAME ? "admin" : "user";
+      const role: UserRole = isBootstrapAdmin(username) ? "admin" : "user";
       const createdAt = new Date().toISOString();
       await withDatabase((db) => db.query("INSERT INTO habitat_users (username, role, created_at) VALUES (?, ?, ?)").run(username, role, createdAt));
       return { username, role, createdAt };
