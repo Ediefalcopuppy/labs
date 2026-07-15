@@ -9,10 +9,12 @@ export default defineConfig(({ mode }) => {
     server: {
       port: Number(env.HABITAT_WEB_PORT ?? "5173"),
       proxy: {
-        "/state": backendUrl,
-        "/commands": backendUrl,
-        "/kepler": backendUrl,
-        "/health": backendUrl,
+      "/state": backendUrl,
+      "/commands": backendUrl,
+      "/kepler": backendUrl,
+      "/health": backendUrl,
+      "/auth": backendUrl,
+      "/admin": backendUrl,
       },
     },
     build: { outDir: "dist", emptyOutDir: true },
