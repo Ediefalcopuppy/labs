@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { StateService } from "../state/service";
 import { fetchKeplerBlueprintCatalog, fetchKeplerSolarIrradiance } from "../kepler/service";
 import { spendInventoryMaterials } from "./inventory";
-import { planConstructionStart, advanceConstructionTick } from "./construction";
+import { forceConstructionStart, planConstructionStart, advanceConstructionTick } from "./construction";
 import { setModuleStatus } from "./modules";
 
 export async function runConstructCommand(params: {
@@ -46,6 +46,41 @@ export async function runConstructCommand(params: {
   });
   await params.stateService.saveState(data);
   return { message: `Started construction for '${plan.displayName}' from blueprint '${blueprint.blueprintId}' using facility '${plan.facility.displayName}'.` };
+}
+
+export async function runDebugConstructCommand(params: {
+  stateService: StateService;
+  blueprintId: string;
+  displayName?: string;
+  moduleName?: string;
+  getBlueprints?: typeof fetchKeplerBlueprintCatalog;
+}): Promise<unknown> {
+  const data = await params.stateService.getState();
+  const getBlueprints = params.getBlueprints ?? fetchKeplerBlueprintCatalog;
+  const blueprints = await getBlueprints();
+  const blueprint = blueprints.find(
+    (candidate) => candidate.blueprintId === params.blueprintId || candidate.id === params.blueprintId,
+  );
+  if (!blueprint) throw new Error(`No blueprint with id '${params.blueprintId}' exists in Kepler.`);
+
+  const forced = forceConstructionStart({
+    blueprint,
+    habitat: data,
+    displayName: params.displayName ?? blueprint.displayName,
+    moduleName: params.moduleName,
+  });
+  data.modules.push({
+    id: forced.name,
+    name: forced.name,
+    blueprintId: forced.blueprintId,
+    displayName: forced.displayName,
+    connectedTo: [],
+    runtimeAttributes: forced.runtimeAttributes,
+    capabilities: forced.capabilities,
+  });
+  data.blueprints = blueprints;
+  await params.stateService.saveState(data);
+  return { message: `Force created module '${forced.displayName}' from blueprint '${forced.blueprintId}'.`, module: forced };
 }
 
 export async function runInventorySetCommand(params: { stateService: StateService; resourceId: string; amount: number }) {

@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { Hono } from "hono";
 import { batteryConstructionDrainPerTick, BATTERY_MAX_CHARGE } from "../construction";
-import { runConstructCommand, runInventorySetCommand, runModuleSetStatusCommand, runTickCommand } from "../domain/commands";
+import { runConstructCommand, runDebugConstructCommand, runInventorySetCommand, runModuleSetStatusCommand, runTickCommand } from "../domain/commands";
 import { spendInventoryMaterials } from "../domain/inventory";
 import { normalizeModuleNames } from "../domain/modules";
 import { readJsonFile, writeSqliteState } from "../storage";
@@ -203,6 +203,10 @@ export function createApp(stateService: StateService = defaultStateService): Hon
   app.post("/commands/construct", async (c) => {
     console.log("[action] construct from blueprint");
     return c.json(await runConstructCommand({ stateService, ...(await c.req.json()) as { blueprintId: string; displayName?: string; moduleName?: string } }));
+  });
+  app.post("/commands/debug/construct", async (c) => {
+    console.log("[action] force construct from blueprint");
+    return c.json(await runDebugConstructCommand({ stateService, ...(await c.req.json()) as { blueprintId: string; displayName?: string; moduleName?: string } }));
   });
   app.post("/commands/module/create", async (c) => {
     console.log("[action] create module from blueprint");

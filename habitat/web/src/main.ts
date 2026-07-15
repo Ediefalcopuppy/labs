@@ -37,7 +37,7 @@ const commands: Command[] = [
   { id: "inventory-list", title: "List inventory", group: "Inventory", description: "Inspect local resource quantities.", method: "GET", path: "/commands/inventory/list" },
   { id: "construction-status", title: "Construction status", group: "Construction", description: "Inspect current construction status.", method: "GET", path: "/commands/construction/status" },
   { id: "construction-cancel", title: "Cancel construction", group: "Construction", description: "Cancel a construction job.", method: "DELETE", path: "/commands/construction/{jobId}", fields: [{ name: "jobId", label: "Job ID", placeholder: "job_123" }] },
-  { id: "debug-construct", title: "Debug construct", group: "Debug", description: "Force a construction plan for diagnostics.", method: "POST", path: "/commands/construct", fields: [{ name: "blueprintId", label: "Blueprint ID", placeholder: "greenhouse" }] },
+  { id: "debug-construct", title: "Debug construct", group: "Debug", description: "Force-create a module without checking materials, facilities, prerequisites, or power.", method: "POST", path: "/commands/debug/construct", fields: [{ name: "blueprintId", label: "Blueprint ID", placeholder: "greenhouse" }] },
   { id: "sqlite", title: "Rebuild SQLite", group: "Settings", description: "Rebuild SQLite state from current habitat state.", method: "POST", path: "/commands/storage/sqlite" },
   { id: "restore", title: "Restore backup", group: "Settings", description: "Restore the local data backup.", method: "POST", path: "/commands/storage/restore" },
   { id: "normalize", title: "Normalize module names", group: "Modules", description: "Repair module IDs and connections.", method: "POST", path: "/commands/module/normalize-names" },
