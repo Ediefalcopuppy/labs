@@ -1317,133 +1317,17 @@ Examples:
 `,
   )
   .action(async (count: number) => {
-    const data = await readData();
-    const completedJobs: string[] = [];
-    let advancedConstructionTicks = 0;
-    let pausedConstructionTicks = 0;
-    let energyCost = 0;
+    const result = await postBackendCommand<{
+      completedJobs: string[];
+      advancedConstructionTicks: number;
+      pausedConstructionTicks: number;
+      energyCost: number;
+    }>("/commands/tick", { count });
 
-    for (let step = 0; step < count; step += 1) {
-      const irradiance = await fetchKeplerSolarIrradiance();
-      const totalPowerDraw = sumModulePowerDraw(data.modules);
-      const batteries = data.modules.filter((module) => moduleIsBattery(module));
-      const onlineConsumers = data.modules.filter(
-        (module) =>
-          moduleCurrentState(module) === "online" &&
-          !moduleIsBattery(module) &&
-          !moduleIsCharger(module),
-      );
-      const onlineChargers = data.modules.filter(
-        (module) => moduleCurrentState(module) === "online" && moduleIsCharger(module),
-      );
-      const totalDrain = onlineConsumers.length;
-      const totalCharge = onlineChargers.reduce(
-        (total, module) => total + chargerChargeRate(module, irradiance),
-        0,
-      );
-      const drainPerBattery = batteries.length > 0 ? totalDrain / batteries.length : 0;
-      const chargePerBattery = batteries.length > 0 ? totalCharge / batteries.length : 0;
-      const solarChargers = onlineChargers;
-      const generatedCharge = solarChargers.reduce(
-        (total, module) => total + solarGeneratedChargePerTick(module, irradiance),
-        0,
-      );
-      const totalRemainingCapacity = batteries.reduce((total, module) => total + batteryRemainingCapacity(module), 0);
-
-      for (const module of data.modules) {
-        const currentPowerTicks = module.runtimeAttributes.powerConsumedTicks;
-        const modulePowerDraw = moduleCurrentPowerDraw(module);
-        const nextPowerTicks =
-          typeof currentPowerTicks === "number" && Number.isFinite(currentPowerTicks)
-            ? currentPowerTicks + modulePowerDraw
-            : modulePowerDraw;
-
-        module.runtimeAttributes = {
-          ...module.runtimeAttributes,
-          powerConsumedTicks: nextPowerTicks,
-        };
-      }
-
-      for (const module of batteries) {
-        const remainingCapacity = batteryRemainingCapacity(module);
-        const batteryShare = totalRemainingCapacity > 0
-          ? generatedCharge * (remainingCapacity / totalRemainingCapacity)
-          : 0;
-        const nextCharge = computeBatteryChargeAfterTick(
-          module,
-          chargePerBattery,
-          drainPerBattery,
-        );
-        module.runtimeAttributes = {
-          ...module.runtimeAttributes,
-          currentEnergyKwh: nextCharge,
-          charge: nextCharge,
-        };
-        const nextSolarCharge = applySolarChargeToBattery(module, batteryShare);
-
-        module.runtimeAttributes = {
-          ...module.runtimeAttributes,
-          currentEnergyKwh: nextSolarCharge,
-          charge: nextSolarCharge,
-        };
-      }
-
-      data.power.powerConsumedTicks += totalPowerDraw;
-      energyCost += totalPowerDraw;
-
-      if (data.constructionJobs.length === 0) {
-        continue;
-      }
-
-      const nextJobs: ConstructionJob[] = [];
-
-      for (const job of data.constructionJobs) {
-        const facility = data.modules.find((module) => module.id === job.facilityModuleId);
-        const constructionPower = spendConstructionPower(data, 1);
-        if (
-          !facility ||
-          !isModuleAvailableForConstruction(facility) ||
-          !constructionPower.spent
-        ) {
-          pausedConstructionTicks += 1;
-          nextJobs.push(job);
-          continue;
-        }
-
-        const remainingBuildTicks = job.remainingBuildTicks - 1;
-        advancedConstructionTicks += 1;
-
-        if (remainingBuildTicks <= 0) {
-          data.modules.push(createModuleFromConstructionJob(job, data.modules));
-          completedJobs.push(job.moduleName);
-          continue;
-        }
-
-        nextJobs.push(
-          normalizeConstructionJob({
-            ...job,
-            remainingBuildTicks,
-          }),
-        );
-      }
-
-      data.constructionJobs = nextJobs;
-    }
-
-    await writeData(data);
-
-    console.log(`Advanced habitat by ${count} tick(s).`);
-    console.log(`Updated power consumption counters on ${data.modules.length} module(s).`);
-    console.log(`Energy cost for ${count} tick(s): ${energyCost}`);
-    if (advancedConstructionTicks > 0) {
-      console.log(`Advanced ${advancedConstructionTicks} construction tick(s).`);
-    }
-    if (pausedConstructionTicks > 0) {
-      console.log(`Paused ${pausedConstructionTicks} construction tick(s) due to unavailable power.`);
-    }
-    if (completedJobs.length > 0) {
-      console.log(`Completed modules: ${completedJobs.join(", ")}.`);
-    }
+    const completedJobs = result.completedJobs.length > 0 ? result.completedJobs.join(", ") : "none";
+    console.log(
+      `Advanced habitat by ${count} tick(s). Completed jobs: ${completedJobs}. Construction advanced: ${result.advancedConstructionTicks}. Construction paused: ${result.pausedConstructionTicks}. Energy cost: ${result.energyCost}.`,
+    );
   });
 
 const zone = new Command("zone")
