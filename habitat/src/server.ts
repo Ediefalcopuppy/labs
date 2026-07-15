@@ -16,6 +16,6 @@ export async function startServer(port: number): Promise<void> {
 }
 
 if (import.meta.main) {
-  const port = Number.parseInt(process.env.PORT ?? "3000", 10);
-  await startServer(Number.isFinite(port) ? port : 3000);
+  const port = Number.parseInt(process.env.PORT ?? "8787", 10);
+  await startServer(Number.isFinite(port) ? port : 8787);
 }

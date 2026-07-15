@@ -56,6 +56,10 @@ function parseIntegerInRange(value: unknown, fieldName: string, min: number, max
 export function createApp(stateService: StateService = defaultStateService): Hono {
   const app = new Hono();
   registerHealthRoute(app);
+  app.onError((error, c) => {
+    console.error(`[error] ${c.req.method} ${new URL(c.req.url).pathname}: ${error.message}`);
+    return c.json({ error: "Habitat request failed", message: error.message }, 500);
+  });
   app.use("*", async (c, next) => {
     const startedAt = Date.now();
     console.log(`[request] ${c.req.method} ${new URL(c.req.url).pathname}`);
@@ -329,7 +333,10 @@ export function createApp(stateService: StateService = defaultStateService): Hon
   app.delete("/commands/module/:name", async (c) => {
     console.log(`[action] delete module ${c.req.param("name")}`);
     const data = await stateService.getState();
-    data.modules = data.modules.filter((module) => module.displayName !== c.req.param("name"));
+    const name = c.req.param("name");
+    const next = data.modules.filter((module) => module.id !== name && module.name !== name && module.displayName !== name);
+    if (next.length === data.modules.length) throw new Error(`No module named '${name}' exists.`);
+    data.modules = next;
     return c.json(await stateService.saveState(data));
   });
 
