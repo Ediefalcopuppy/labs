@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import { buildCommandRequest, getCommandById } from "../web/src/commands";
 import { routeFromHash, viewToHash } from "../web/src/routes";
-import { constructionProgress, isDoomEasterEgg, materialEntries, notificationSummary } from "../web/src/ui-format";
+import { constructionProgress, isDoomEasterEgg, materialEntries, notificationSummary, resourceScanPayload } from "../web/src/ui-format";
 
 describe("web routes", () => {
   test("round-trips a view through the hash route", () => {
@@ -76,5 +76,12 @@ describe("command drawer easter egg", () => {
 describe("quick action notifications", () => {
   test("keeps a compact readable summary while preserving multiple output lines", () => {
     expect(notificationSummary("Power overview", "Current draw: 12 W\nModules online: 3\nExtra detail: hidden from toast")).toBe("Power overview: Current draw: 12 W · Modules online: 3");
+  });
+});
+
+describe("resource scanning", () => {
+  test("uses explicit coordinates unless the deployed EVA position is selected", () => {
+    expect(resourceScanPayload({ x: "12", y: "-4", sensorStrength: "70", radiusTiles: "2", useEvaPosition: false })).toEqual({ x: 12, y: -4, sensorStrength: 70, radiusTiles: 2 });
+    expect(resourceScanPayload({ x: "12", y: "-4", sensorStrength: "70", radiusTiles: "2", useEvaPosition: true })).toEqual({ sensorStrength: 70, radiusTiles: 2 });
   });
 });

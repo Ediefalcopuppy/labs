@@ -9,6 +9,18 @@ export function notificationSummary(title: string, text: string): string {
   return `${title}: ${lines.slice(0, 2).join(" · ") || "Completed."}`;
 }
 
+export function resourceScanPayload(values: { x: string; y: string; sensorStrength: string; radiusTiles: string; useEvaPosition: boolean }): Record<string, number> {
+  const payload: Record<string, number> = {
+    sensorStrength: Number(values.sensorStrength),
+    radiusTiles: Number(values.radiusTiles),
+  };
+  if (!values.useEvaPosition) {
+    payload.x = Number(values.x);
+    payload.y = Number(values.y);
+  }
+  return payload;
+}
+
 export type ConstructionProgress = {
   remainingBuildTicks: unknown;
   totalBuildTicks: unknown;
