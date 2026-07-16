@@ -409,6 +409,13 @@ export async function fetchKeplerWorldSector(habitatId: string): Promise<{ minX:
   return bounds as { minX: number; maxX: number; minY: number; maxY: number };
 }
 
+export async function collectKeplerWorldResource(input: { habitatId: string; x: number; y: number; quantityKg: number }): Promise<{ resourceType: string; collectedKg: number }> {
+  const payload = await postKeplerJson("/world/collect", input, "habitat collect <quantity-kg>") as { collection?: Record<string, unknown> };
+  const collection = payload.collection;
+  if (!collection || typeof collection.resourceType !== "string" || typeof collection.collectedKg !== "number" || collection.collectedKg <= 0) throw new Error("Kepler collection response was invalid.");
+  return { resourceType: collection.resourceType, collectedKg: collection.collectedKg };
+}
+
 export async function refreshKeplerBlueprintCatalog(): Promise<KeplerBlueprintCatalogEntry[]> {
   return fetchKeplerBlueprintCatalog();
 }

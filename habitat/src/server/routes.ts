@@ -8,7 +8,7 @@ import { spendInventoryMaterials } from "../domain/inventory";
 import { listHumans } from "../domain/humans";
 import { normalizeModuleNames } from "../domain/modules";
 import { readJsonFile, writeSqliteState } from "../storage";
-import { fetchKeplerBlueprintCatalog, fetchKeplerHabitatRegistration, fetchKeplerHabitatRegistrationDetails, fetchKeplerResourceCatalog, fetchKeplerSolarIrradiance, fetchKeplerWorldScan, fetchKeplerWorldSector, registerKeplerHabitat } from "../kepler/service";
+import { collectKeplerWorldResource, fetchKeplerBlueprintCatalog, fetchKeplerHabitatRegistration, fetchKeplerHabitatRegistrationDetails, fetchKeplerResourceCatalog, fetchKeplerSolarIrradiance, fetchKeplerWorldScan, fetchKeplerWorldSector, registerKeplerHabitat } from "../kepler/service";
 import { registerHealthRoute } from "./health";
 import { createStateService, type StateService, normalizeState } from "../state/service";
 import type { StarterHuman, StarterModuleRegistration } from "../state/types";
@@ -413,10 +413,11 @@ export function createApp(stateService: StateService = defaultStateService): Hon
     console.log(`[action] collect ${quantityKg}kg`);
     const data = await stateService.getState();
     if (!data.eva.deployed) throw new Error("EVA must be deployed before collecting material.");
-    const available = data.inventory.material;
-    const collectedKg = typeof available === "number" ? Math.min(quantityKg, available) : quantityKg;
-    if (typeof available === "number") data.inventory.material = available - collectedKg;
-    data.eva.carriedResources.material = (data.eva.carriedResources.material ?? 0) + collectedKg;
+    if (!data.registration?.habitatId) throw new Error("Habitat registration must include a habitatId before collecting material.");
+    const carriedKg = Object.values(data.eva.carriedResources).reduce((total, amount) => total + amount, 0);
+    if (carriedKg + quantityKg > data.eva.maxCarryingCapacityKg) throw new Error("Requested collection exceeds EVA carrying capacity.");
+    const collection = await collectKeplerWorldResource({ habitatId: data.registration.habitatId, x: data.eva.x, y: data.eva.y, quantityKg });
+    data.eva.carriedResources[collection.resourceType] = (data.eva.carriedResources[collection.resourceType] ?? 0) + collection.collectedKg;
     return c.json(await stateService.saveState(data));
   });
 
