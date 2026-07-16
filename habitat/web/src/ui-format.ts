@@ -4,6 +4,11 @@ export function isDoomEasterEgg(query: string): boolean {
   return query.trim().toUpperCase() === "DOOM1234";
 }
 
+export function notificationSummary(title: string, text: string): string {
+  const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  return `${title}: ${lines.slice(0, 2).join(" · ") || "Completed."}`;
+}
+
 export type ConstructionProgress = {
   remainingBuildTicks: unknown;
   totalBuildTicks: unknown;

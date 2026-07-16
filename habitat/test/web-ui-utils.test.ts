@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import { buildCommandRequest, getCommandById } from "../web/src/commands";
 import { routeFromHash, viewToHash } from "../web/src/routes";
-import { constructionProgress, isDoomEasterEgg, materialEntries } from "../web/src/ui-format";
+import { constructionProgress, isDoomEasterEgg, materialEntries, notificationSummary } from "../web/src/ui-format";
 
 describe("web routes", () => {
   test("round-trips a view through the hash route", () => {
@@ -70,5 +70,11 @@ describe("command drawer easter egg", () => {
     expect(isDoomEasterEgg(" doom1234 ")).toBe(true);
     expect(isDoomEasterEgg("DOOM123")).toBe(false);
     expect(isDoomEasterEgg("status DOOM1234")).toBe(false);
+  });
+});
+
+describe("quick action notifications", () => {
+  test("keeps a compact readable summary while preserving multiple output lines", () => {
+    expect(notificationSummary("Power overview", "Current draw: 12 W\nModules online: 3\nExtra detail: hidden from toast")).toBe("Power overview: Current draw: 12 W · Modules online: 3");
   });
 });
