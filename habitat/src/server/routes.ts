@@ -7,7 +7,7 @@ import { runConstructCommand, runDebugConstructCommand, runInventorySetCommand, 
 import { spendInventoryMaterials } from "../domain/inventory";
 import { normalizeModuleNames } from "../domain/modules";
 import { readJsonFile, writeSqliteState } from "../storage";
-import { fetchKeplerBlueprintCatalog, fetchKeplerHabitatRegistration, fetchKeplerResourceCatalog, fetchKeplerSolarIrradiance, fetchKeplerWorldScan } from "../kepler/service";
+import { fetchKeplerBlueprintCatalog, fetchKeplerHabitatRegistration, fetchKeplerHabitatRegistrationDetails, fetchKeplerResourceCatalog, fetchKeplerSolarIrradiance, fetchKeplerWorldScan } from "../kepler/service";
 import { registerHealthRoute } from "./health";
 import { createStateService, type StateService, normalizeState } from "../state/service";
 
@@ -115,6 +115,20 @@ export function createApp(stateService: StateService = defaultStateService): Hon
   app.get("/kepler/resources", async (c) => c.json(await fetchKeplerResourceCatalog()));
   app.get("/kepler/solar", async (c) => c.json({ irradiance: await fetchKeplerSolarIrradiance() }));
   app.get("/kepler/habitats/:habitatId/registration", async (c) => c.json(await fetchKeplerHabitatRegistration(c.req.param("habitatId"))));
+  app.get("/commands/registration/details", async (c) => {
+    console.log("[action] inspect registration details");
+    const data = await stateService.getState();
+    const registration = data.registration;
+
+    if (!registration?.habitatId) {
+      throw new Error("Habitat registration must include a habitatId before listing registration details.");
+    }
+
+    return c.json({
+      registration,
+      kepler: await fetchKeplerHabitatRegistrationDetails(registration.habitatId),
+    });
+  });
 
   app.post("/commands/register", async (c) => {
     console.log("[action] register habitat");

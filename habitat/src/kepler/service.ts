@@ -13,6 +13,11 @@ type KeplerHabitatResponse = {
   habitat?: Partial<KeplerHabitat>;
 };
 
+type KeplerHabitatDetailsResponse = {
+  habitat?: Record<string, unknown>;
+  [key: string]: unknown;
+};
+
 export type KeplerBlueprintCatalogEntry = {
   id?: string;
   blueprintId: string;
@@ -284,6 +289,15 @@ export async function fetchKeplerHabitatRegistration(habitatId: string): Promise
   }
 
   return normalizeKeplerHabitat(payload.habitat);
+}
+
+export async function fetchKeplerHabitatRegistrationDetails(
+  habitatId: string,
+): Promise<unknown> {
+  return (await fetchKeplerJson(
+    `/habitats/${encodeURIComponent(habitatId)}/registration`,
+    "habitat registration details",
+  )) as KeplerHabitatDetailsResponse;
 }
 
 export async function fetchKeplerWorldScan(params: {

@@ -126,6 +126,47 @@ function linkedRegistrationFromHabitat(
   };
 }
 
+function formatRegistrationDetails(payload: {
+  registration?: HabitatRegistration | null;
+  kepler?: unknown;
+}): string[] {
+  const lines: string[] = [];
+  const registration = payload.registration;
+  const kepler = payload.kepler;
+
+  lines.push(`${paint("Saved registration:", color.bold, color.cyan)} ${paint(registration ? "yes" : "no", color.green)}`);
+
+  if (registration) {
+    lines.push(`${paint("  display name:", color.bold, color.cyan)} ${paint(registration.displayName, color.green)}`);
+    lines.push(`${paint("  registered at:", color.bold, color.cyan)} ${paint(registration.registeredAt, color.green)}`);
+    lines.push(`${paint("  last synced at:", color.bold, color.cyan)} ${paint(registration.lastSyncedAt, color.green)}`);
+    if (registration.habitatId) lines.push(`${paint("  habitat id:", color.bold, color.cyan)} ${paint(registration.habitatId, color.green)}`);
+    if (registration.habitatSlug) lines.push(`${paint("  habitat slug:", color.bold, color.cyan)} ${paint(registration.habitatSlug, color.green)}`);
+    if (registration.catalogVersion) lines.push(`${paint("  catalog version:", color.bold, color.cyan)} ${paint(registration.catalogVersion, color.green)}`);
+    if (registration.remoteStatus) lines.push(`${paint("  remote status:", color.bold, color.cyan)} ${paint(registration.remoteStatus, color.green)}`);
+    if (registration.lastSeenAt) lines.push(`${paint("  last seen at:", color.bold, color.cyan)} ${paint(registration.lastSeenAt, color.green)}`);
+  }
+
+  if (kepler && typeof kepler === "object") {
+    lines.push(`${paint("Live Kepler habitat payload:", color.bold, color.cyan)}`);
+    for (const [key, value] of Object.entries(kepler as Record<string, unknown>)) {
+      if (value === undefined) {
+        continue;
+      }
+
+      const rendered =
+        value === null
+          ? "null"
+          : typeof value === "string" || typeof value === "number" || typeof value === "boolean"
+            ? String(value)
+            : JSON.stringify(value, null, 2);
+      lines.push(`  ${paint(`${key}:`, color.bold, color.cyan)} ${paint(rendered, color.green)}`);
+    }
+  }
+
+  return lines;
+}
+
 function normalizeModule(module: HabitatModule): HabitatModule {
   return {
     id: module.id,
@@ -1063,6 +1104,30 @@ program
     await writeData(data);
 
     console.log(`Unregistered habitat '${displayName}'.`);
+  });
+
+const registrationCommand = program
+  .command("registration")
+  .description("Inspect the habitat registration.");
+
+registrationCommand
+  .command("details")
+  .description("List the saved registration details and live Kepler habitat payload.")
+  .option("--json", "print the complete JSON response")
+  .action(async (options: { json?: boolean }) => {
+    const payload = await getBackendCommand<{
+      registration?: HabitatRegistration | null;
+      kepler?: unknown;
+    }>("/commands/registration/details");
+
+    if (options.json) {
+      console.log(JSON.stringify(payload, null, 2));
+      return;
+    }
+
+    for (const line of formatRegistrationDetails(payload)) {
+      console.log(line);
+    }
   });
 
 program
