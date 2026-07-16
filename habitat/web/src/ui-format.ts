@@ -1,5 +1,9 @@
 export type MaterialInput = Record<string, unknown> | null | undefined;
 
+export function isDoomEasterEgg(query: string): boolean {
+  return query.trim().toUpperCase() === "DOOM1234";
+}
+
 export type ConstructionProgress = {
   remainingBuildTicks: unknown;
   totalBuildTicks: unknown;

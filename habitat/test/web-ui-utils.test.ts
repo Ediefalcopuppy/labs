@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import { buildCommandRequest, getCommandById } from "../web/src/commands";
 import { routeFromHash, viewToHash } from "../web/src/routes";
-import { constructionProgress, materialEntries } from "../web/src/ui-format";
+import { constructionProgress, isDoomEasterEgg, materialEntries } from "../web/src/ui-format";
 
 describe("web routes", () => {
   test("round-trips a view through the hash route", () => {
@@ -61,5 +61,14 @@ describe("live page formatting", () => {
       percent: 90,
       label: "1 tick remaining",
     });
+  });
+});
+
+describe("command drawer easter egg", () => {
+  test("only reveals the Doom option for the secret code", () => {
+    expect(isDoomEasterEgg("DOOM1234")).toBe(true);
+    expect(isDoomEasterEgg(" doom1234 ")).toBe(true);
+    expect(isDoomEasterEgg("DOOM123")).toBe(false);
+    expect(isDoomEasterEgg("status DOOM1234")).toBe(false);
   });
 });
