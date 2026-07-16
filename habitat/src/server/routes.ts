@@ -284,6 +284,37 @@ export function createApp(stateService: StateService = defaultStateService): Hon
     console.log("[action] list humans");
     return c.json((await stateService.getState()).humans);
   });
+  app.post("/commands/debug/human", async (c) => {
+    const body = (await c.req.json()) as {
+      id?: unknown;
+      name?: unknown;
+      moduleId?: unknown;
+      x?: unknown;
+      y?: unknown;
+      status?: unknown;
+    };
+    if (typeof body.id !== "string" || body.id.length === 0) throw new Error("id must be a non-empty string.");
+    if (body.name !== undefined && typeof body.name !== "string") throw new Error("name must be a string.");
+    if (body.moduleId !== undefined && typeof body.moduleId !== "string") throw new Error("moduleId must be a string.");
+    if ((body.x === undefined) !== (body.y === undefined)) throw new Error("x and y must be provided together.");
+    const data = await stateService.getState();
+    if (data.humans.some((human) => human.id === body.id)) throw new Error(`A human with id '${body.id}' already exists.`);
+    const human = {
+      id: body.id,
+      name: typeof body.name === "string" && body.name.length > 0 ? body.name : body.id,
+      ...(typeof body.moduleId === "string" && body.moduleId.length > 0 ? { moduleId: body.moduleId } : {}),
+      ...(body.x !== undefined && body.y !== undefined
+        ? {
+            x: parseIntegerInRange(body.x, "x", Number.MIN_SAFE_INTEGER, Number.MAX_SAFE_INTEGER),
+            y: parseIntegerInRange(body.y, "y", Number.MIN_SAFE_INTEGER, Number.MAX_SAFE_INTEGER),
+          }
+        : {}),
+      status: typeof body.status === "string" && body.status.length > 0 ? body.status : "available",
+    };
+    console.log(`[action] debug add human ${body.id}`);
+    data.humans.push(human);
+    return c.json(await stateService.saveState(data));
+  });
   app.post("/commands/human/move", async (c) => {
     const body = (await c.req.json()) as { humanId?: unknown; moduleId?: unknown };
     if (typeof body.humanId !== "string" || body.humanId.length === 0) throw new Error("humanId must be a non-empty string.");

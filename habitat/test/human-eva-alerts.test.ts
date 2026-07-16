@@ -78,6 +78,20 @@ describe("human, EVA, and alert commands", () => {
     expect(state.alerts[0]?.status).toBe("acknowledged");
   });
 
+  test("debug add human persists a human on the backend", async () => {
+    const service = createStateService();
+    const app = createApp(service as never);
+    const response = await app.request("/commands/debug/human", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ id: "human-debug-1", name: "Debug Human", moduleId: "habitat-core", x: 1, y: -2 }),
+    });
+
+    expect(response.status).toBe(200);
+    const state = await service.getState();
+    expect(state.humans).toContainEqual({ id: "human-debug-1", name: "Debug Human", moduleId: "habitat-core", x: 1, y: -2, status: "available" });
+  });
+
   test("resource scan uses the deployed EVA position when coordinates are omitted", async () => {
     const service = createStateService({
       registration: { displayName: "Habitat", habitatId: "habitat-1" },

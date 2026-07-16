@@ -2543,6 +2543,29 @@ Notes:
   );
 
 debugCommand
+  .command("add-human")
+  .description("Add a human directly to backend state for debugging.")
+  .argument("<human-id>", "human id")
+  .option("-n, --name <name>", "human display name")
+  .option("-m, --module-id <moduleId>", "starting module id")
+  .option("--x <integer>", "starting x coordinate", (value) => parseInteger(value, "x"))
+  .option("--y <integer>", "starting y coordinate", (value) => parseInteger(value, "y"))
+  .option("--status <status>", "initial human status", "available")
+  .action(async (humanId: string, options: { name?: string; moduleId?: string; x?: number; y?: number; status: string }) => {
+    if ((options.x === undefined) !== (options.y === undefined)) {
+      program.error("--x and --y must be provided together.");
+    }
+    await postBackendCommand<unknown>("/commands/debug/human", {
+      id: humanId,
+      ...(options.name !== undefined ? { name: options.name } : {}),
+      ...(options.moduleId !== undefined ? { moduleId: options.moduleId } : {}),
+      ...(options.x !== undefined && options.y !== undefined ? { x: options.x, y: options.y } : {}),
+      status: options.status,
+    });
+    console.log(`Added debug human '${humanId}'.`);
+  });
+
+debugCommand
   .command("construct")
   .description("Force create a module from a Kepler blueprint.")
   .argument("<blueprint-id>", "published blueprint id")
