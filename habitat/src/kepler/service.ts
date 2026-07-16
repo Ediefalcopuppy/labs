@@ -1,4 +1,9 @@
-import { fetchKeplerJson } from "./client";
+import { fetchKeplerJson, postKeplerJson } from "./client";
+import type {
+  RegistrationContracts,
+  StarterHuman,
+  StarterModuleRegistration,
+} from "../state/types";
 
 export type KeplerHabitat = {
   id: string;
@@ -7,7 +12,9 @@ export type KeplerHabitat = {
   catalogVersion: string;
   status: string;
   lastSeenAt?: string | null;
-  starterHumans?: unknown;
+  starterHumans?: StarterHuman[];
+  starterModules?: StarterModuleRegistration[];
+  contracts?: RegistrationContracts;
   contacts?: unknown;
 };
 
@@ -18,6 +25,13 @@ type KeplerHabitatResponse = {
 type KeplerHabitatDetailsResponse = {
   habitat?: Record<string, unknown>;
   [key: string]: unknown;
+};
+
+export type KeplerHabitatRegistration = {
+  habitatId: string;
+  starterModules: StarterModuleRegistration[];
+  starterHumans: StarterHuman[];
+  contracts: RegistrationContracts;
 };
 
 export type KeplerBlueprintCatalogEntry = {
@@ -87,6 +101,59 @@ type KeplerSolarIrradianceResponse =
       };
     };
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function normalizeStarterHumans(value: unknown): StarterHuman[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const humans = value.filter((human): human is StarterHuman => {
+    if (!isRecord(human)) return false;
+    return typeof human.id === "string" && human.id.length > 0 &&
+      typeof human.displayName === "string" && human.displayName.length > 0 &&
+      typeof human.locationModuleId === "string" && human.locationModuleId.length > 0;
+  });
+  return humans.length === value.length ? humans : undefined;
+}
+
+function normalizeStarterModules(value: unknown): StarterModuleRegistration[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const modules = value.filter((module): module is StarterModuleRegistration => {
+    if (!isRecord(module)) return false;
+    return typeof module.id === "string" && module.id.length > 0 &&
+      typeof module.blueprintId === "string" && module.blueprintId.length > 0 &&
+      typeof module.displayName === "string" && module.displayName.length > 0 &&
+      Array.isArray(module.connectedTo) && module.connectedTo.every((id) => typeof id === "string") &&
+      isRecord(module.runtimeAttributes) &&
+      Array.isArray(module.capabilities) && module.capabilities.every((capability) => typeof capability === "string");
+  });
+  return modules.length === value.length ? modules : undefined;
+}
+
+function normalizeRegistrationContracts(value: unknown): RegistrationContracts | undefined {
+  if (!isRecord(value) || !isRecord(value.alerts)) return undefined;
+  const { alerts } = value;
+  if (typeof alerts.schemaVersion !== "string" || alerts.schemaVersion.length === 0 || !isRecord(alerts.schema)) {
+    return undefined;
+  }
+  return { alerts: { schemaVersion: alerts.schemaVersion, schema: alerts.schema } };
+}
+
+function normalizeKeplerHabitatRegistrationResponse(value: unknown): KeplerHabitatRegistration {
+  if (!isRecord(value) || typeof value.habitatId !== "string" || value.habitatId.length === 0) {
+    throw new Error("Kepler registration response did not include a habitatId.");
+  }
+
+  const starterModules = normalizeStarterModules(value.starterModules);
+  const starterHumans = normalizeStarterHumans(value.starterHumans);
+  const contracts = normalizeRegistrationContracts(value.contracts);
+  if (!starterModules || !starterHumans || !contracts) {
+    throw new Error("Kepler registration response did not include valid starter modules, humans, and alert contracts.");
+  }
+
+  return { habitatId: value.habitatId, starterModules, starterHumans, contracts };
+}
+
 function normalizeKeplerHabitat(value: Partial<KeplerHabitat>): KeplerHabitat {
   if (typeof value.id !== "string" || value.id.length === 0) {
     throw new Error("Kepler returned a habitat without a valid id.");
@@ -118,7 +185,9 @@ function normalizeKeplerHabitat(value: Partial<KeplerHabitat>): KeplerHabitat {
       typeof value.lastSeenAt === "string" || value.lastSeenAt === null
         ? value.lastSeenAt
         : undefined,
-    starterHumans: value.starterHumans,
+    starterHumans: normalizeStarterHumans(value.starterHumans),
+    starterModules: normalizeStarterModules(value.starterModules),
+    contracts: normalizeRegistrationContracts(value.contracts),
     contacts: value.contacts,
   };
 }
@@ -261,6 +330,17 @@ export function normalizeKeplerHabitatRegistration(
   return normalizeKeplerHabitat(habitat);
 }
 
+export async function registerKeplerHabitat(input: {
+  displayName: string;
+  habitatUuid: string;
+}): Promise<KeplerHabitatRegistration> {
+  return normalizeKeplerHabitatRegistrationResponse(await postKeplerJson(
+    "/habitats/register",
+    input,
+    "habitat register --name <habitat-name>",
+  ));
+}
+
 export async function fetchKeplerBlueprintCatalog(): Promise<KeplerBlueprintCatalogEntry[]> {
   const payload = (await fetchKeplerJson(
     "/catalog/blueprints",
@@ -320,6 +400,13 @@ export async function fetchKeplerWorldScan(params: {
   });
 
   return fetchKeplerJson(`/world/scan?${search.toString()}`, "habitat resource scan");
+}
+
+export async function fetchKeplerWorldSector(habitatId: string): Promise<{ minX: number; maxX: number; minY: number; maxY: number }> {
+  const payload = await fetchKeplerJson(`/world/sectors/current?habitatId=${encodeURIComponent(habitatId)}`, "habitat eva move") as { sector?: { bounds?: Record<string, unknown> } };
+  const bounds = payload.sector?.bounds;
+  if (!bounds || ![bounds.minX, bounds.maxX, bounds.minY, bounds.maxY].every((value) => typeof value === "number" && Number.isInteger(value))) throw new Error("Kepler sector response did not include valid bounds.");
+  return bounds as { minX: number; maxX: number; minY: number; maxY: number };
 }
 
 export async function refreshKeplerBlueprintCatalog(): Promise<KeplerBlueprintCatalogEntry[]> {

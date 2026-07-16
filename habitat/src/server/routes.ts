@@ -5,11 +5,13 @@ import { createAuthService, type User, type UserRole } from "../auth";
 import { batteryConstructionDrainPerTick, BATTERY_MAX_CHARGE } from "../construction";
 import { runConstructCommand, runDebugConstructCommand, runInventorySetCommand, runModuleSetStatusCommand, runTickCommand } from "../domain/commands";
 import { spendInventoryMaterials } from "../domain/inventory";
+import { listHumans } from "../domain/humans";
 import { normalizeModuleNames } from "../domain/modules";
 import { readJsonFile, writeSqliteState } from "../storage";
-import { fetchKeplerBlueprintCatalog, fetchKeplerHabitatRegistration, fetchKeplerHabitatRegistrationDetails, fetchKeplerResourceCatalog, fetchKeplerSolarIrradiance, fetchKeplerWorldScan } from "../kepler/service";
+import { fetchKeplerBlueprintCatalog, fetchKeplerHabitatRegistration, fetchKeplerHabitatRegistrationDetails, fetchKeplerResourceCatalog, fetchKeplerSolarIrradiance, fetchKeplerWorldScan, fetchKeplerWorldSector, registerKeplerHabitat } from "../kepler/service";
 import { registerHealthRoute } from "./health";
 import { createStateService, type StateService, normalizeState } from "../state/service";
+import type { StarterHuman, StarterModuleRegistration } from "../state/types";
 
 const defaultStateService = createStateService({ storagePath: ".habitat/habitat.sqlite" });
 const defaultAuthService = createAuthService(".habitat/habitat.sqlite");
@@ -61,14 +63,26 @@ function parseIntegerInRange(value: unknown, fieldName: string, min: number, max
 
 function materializeRegistrationState(
   data: Awaited<ReturnType<StateService["getState"]>>,
-  starterHumans: unknown,
+  starterModules: StarterModuleRegistration[] | undefined,
+  starterHumans: StarterHuman[] | undefined,
   contacts: unknown,
 ): void {
-  if (Array.isArray(starterHumans)) {
-    data.humans = starterHumans
-      .filter((human): human is Record<string, unknown> => Boolean(human && typeof human === "object"))
-      .filter((human) => typeof human.id === "string" && human.id.length > 0)
-      .map((human) => ({ ...human, id: human.id as string })) as typeof data.humans;
+  if (starterModules) {
+    data.modules = starterModules.map((module) => ({
+      ...module,
+      name: module.id,
+      connectedTo: [...module.connectedTo],
+      runtimeAttributes: { ...module.runtimeAttributes },
+      capabilities: [...module.capabilities],
+    }));
+  }
+
+  if (starterHumans) {
+    data.humans = starterHumans.map((human) => ({
+      id: human.id,
+      name: human.displayName,
+      moduleId: human.locationModuleId,
+    }));
   }
 
   const contactAlerts = contacts && typeof contacts === "object"
@@ -125,6 +139,7 @@ export function createApp(stateService: StateService = defaultStateService): Hon
   app.post("/admin/users/:username/role", async (c) => { requireAdmin(c); const body = await c.req.json() as { role?: UserRole }; return c.json(await authService.setRole(c.req.param("username"), body.role ?? "user")); });
 
   app.get("/state", async (c) => c.json(await stateService.getState()));
+  app.get("/humans", async (c) => c.json(await listHumans(stateService)));
   app.post("/state", async (c) => {
     console.log("[action] save habitat state");
     return c.json(await stateService.saveState(await c.req.json()));
@@ -158,8 +173,23 @@ export function createApp(stateService: StateService = defaultStateService): Hon
     const { name } = (await c.req.json()) as { name: string };
     const data = await stateService.getState();
     if (data.registration) throw new Error(`This directory is already registered as '${data.registration.displayName}'.`);
+    const keplerRegistration = await registerKeplerHabitat({ displayName: name, habitatUuid: randomUUID() });
     const now = new Date().toISOString();
-    data.registration = { displayName: name, registeredAt: now, lastSyncedAt: now };
+    data.registration = {
+      displayName: name,
+      registeredAt: now,
+      lastSyncedAt: now,
+      habitatId: keplerRegistration.habitatId,
+      starterModules: keplerRegistration.starterModules,
+      starterHumans: keplerRegistration.starterHumans,
+      contracts: keplerRegistration.contracts,
+    };
+    materializeRegistrationState(
+      data,
+      keplerRegistration.starterModules,
+      keplerRegistration.starterHumans,
+      undefined,
+    );
     return c.json(await stateService.saveState(data));
   });
   app.post("/commands/link", async (c) => {
@@ -169,8 +199,8 @@ export function createApp(stateService: StateService = defaultStateService): Hon
     if (data.registration) throw new Error(`This directory is already registered as '${data.registration.displayName}'.`);
     const habitat = await fetchKeplerHabitatRegistration(id);
     const now = new Date().toISOString();
-    data.registration = { displayName: habitat.displayName, registeredAt: now, lastSyncedAt: now, habitatId: habitat.id, habitatSlug: habitat.habitatSlug, catalogVersion: habitat.catalogVersion, remoteStatus: habitat.status, lastSeenAt: habitat.lastSeenAt ?? null, starterHumans: habitat.starterHumans, contacts: habitat.contacts };
-    materializeRegistrationState(data, habitat.starterHumans, habitat.contacts);
+    data.registration = { displayName: habitat.displayName, registeredAt: now, lastSyncedAt: now, habitatId: habitat.id, habitatSlug: habitat.habitatSlug, catalogVersion: habitat.catalogVersion, remoteStatus: habitat.status, lastSeenAt: habitat.lastSeenAt ?? null, starterHumans: habitat.starterHumans, starterModules: habitat.starterModules, contracts: habitat.contracts, contacts: habitat.contacts };
+    materializeRegistrationState(data, habitat.starterModules, habitat.starterHumans, habitat.contacts);
     return c.json(await stateService.saveState(data));
   });
   app.delete("/commands/unregister", async (c) => {
@@ -280,10 +310,6 @@ export function createApp(stateService: StateService = defaultStateService): Hon
     return c.json(await runInventorySetCommand({ stateService, ...(await c.req.json()) as { resourceId: string; amount: number } }));
   });
 
-  app.get("/commands/human/list", async (c) => {
-    console.log("[action] list humans");
-    return c.json((await stateService.getState()).humans);
-  });
   app.post("/commands/debug/human", async (c) => {
     const body = (await c.req.json()) as {
       id?: unknown;
@@ -322,8 +348,16 @@ export function createApp(stateService: StateService = defaultStateService): Hon
     console.log(`[action] move human ${body.humanId} to ${body.moduleId}`);
     const data = await stateService.getState();
     const human = requireItem(data.humans, (candidate) => candidate.id === body.humanId, `No human with id '${body.humanId}' exists.`);
-    requireItem(data.modules, (candidate) => candidate.id === body.moduleId || candidate.name === body.moduleId || candidate.displayName === body.moduleId, `No module with id '${body.moduleId}' exists.`);
-    human.moduleId = body.moduleId;
+    const destination = requireItem(
+      data.modules,
+      (candidate) => candidate.id === body.moduleId || candidate.name === body.moduleId || candidate.displayName === body.moduleId,
+      `No module named '${body.moduleId}' exists.`,
+    );
+    const crewCapacity = destination.runtimeAttributes.crewCapacity;
+    const capacity = typeof crewCapacity === "number" && Number.isFinite(crewCapacity) ? crewCapacity : 0;
+    const occupants = data.humans.filter((candidate) => candidate.moduleId === destination.id && candidate.id !== human.id).length;
+    if (occupants >= capacity) throw new Error(`Module '${body.moduleId}' is full.`);
+    human.moduleId = destination.id;
     return c.json(await stateService.saveState(data));
   });
 
@@ -338,9 +372,9 @@ export function createApp(stateService: StateService = defaultStateService): Hon
     const data = await stateService.getState();
     if (data.eva.deployed) throw new Error(`EVA is already deployed for human '${data.eva.humanId ?? "unknown"}'.`);
     const human = requireItem(data.humans, (candidate) => candidate.id === body.humanId, `No human with id '${body.humanId}' exists.`);
-    const x = typeof human.x === "number" && Number.isInteger(human.x) ? human.x : 0;
-    const y = typeof human.y === "number" && Number.isInteger(human.y) ? human.y : 0;
-    data.eva = { deployed: true, humanId: human.id, x, y, carriedResources: {} };
+    const suitport = data.modules.find((module) => module.blueprintId === "basic-suitport" || module.capabilities.includes("suitport-access"));
+    if (!suitport || human.moduleId !== suitport.id) throw new Error("The selected human must be inside the registered suitport before EVA deployment.");
+    data.eva = { deployed: true, humanId: human.id, x: 0, y: 0, carriedResources: {}, maxCarryingCapacityKg: data.eva.maxCarryingCapacityKg };
     human.status = "deployed";
     return c.json(await stateService.saveState(data));
   });
@@ -352,6 +386,9 @@ export function createApp(stateService: StateService = defaultStateService): Hon
     const data = await stateService.getState();
     if (!data.eva.deployed) throw new Error("EVA must be deployed before it can move.");
     if (Math.abs(x - data.eva.x) + Math.abs(y - data.eva.y) !== 1) throw new Error("EVA movement must be to an adjacent grid tile.");
+    if (!data.registration?.habitatId) throw new Error("Habitat registration must include a habitatId before EVA movement.");
+    const bounds = await fetchKeplerWorldSector(data.registration.habitatId);
+    if (x < bounds.minX || x > bounds.maxX || y < bounds.minY || y > bounds.maxY) throw new Error("EVA destination is outside the current Kepler sector.");
     data.eva.x = x;
     data.eva.y = y;
     return c.json(await stateService.saveState(data));
@@ -360,12 +397,13 @@ export function createApp(stateService: StateService = defaultStateService): Hon
     console.log("[action] dock EVA");
     const data = await stateService.getState();
     if (!data.eva.deployed) throw new Error("EVA is already docked.");
+    if (data.eva.x !== 0 || data.eva.y !== 0) throw new Error("EVA can dock only at (0, 0).");
     for (const [resourceId, quantity] of Object.entries(data.eva.carriedResources)) {
       data.inventory[resourceId] = (data.inventory[resourceId] ?? 0) + quantity;
     }
     const human = data.eva.humanId ? data.humans.find((candidate) => candidate.id === data.eva.humanId) : undefined;
     if (human) human.status = "docked";
-    data.eva = { deployed: false, x: 0, y: 0, carriedResources: {} };
+    data.eva = { deployed: false, x: 0, y: 0, carriedResources: {}, maxCarryingCapacityKg: data.eva.maxCarryingCapacityKg };
     return c.json(await stateService.saveState(data));
   });
   app.post("/commands/collect", async (c) => {
@@ -544,6 +582,8 @@ export function createApp(stateService: StateService = defaultStateService): Hon
     const name = c.req.param("name");
     const next = data.modules.filter((module) => module.id !== name && module.name !== name && module.displayName !== name);
     if (next.length === data.modules.length) throw new Error(`No module named '${name}' exists.`);
+    const deleted = data.modules.find((module) => module.id === name || module.name === name || module.displayName === name);
+    if (deleted && data.humans.some((human) => human.moduleId === deleted.id)) throw new Error(`Module '${name}' is occupied and cannot be deleted.`);
     data.modules = next;
     return c.json(await stateService.saveState(data));
   });

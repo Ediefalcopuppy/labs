@@ -28,9 +28,17 @@ export async function readSqliteState(path: string): Promise<unknown | undefined
 export async function writeSqliteState(path: string, state: unknown): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
   const database = new Database(path);
-  database.run("CREATE TABLE IF NOT EXISTS habitat_state (key TEXT PRIMARY KEY, value_json TEXT NOT NULL)");
-  database
-    .query("INSERT INTO habitat_state (key, value_json) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json")
-    .run(STATE_KEY, JSON.stringify(state));
-  database.close();
+  try {
+    database.run("BEGIN IMMEDIATE");
+    database.run("CREATE TABLE IF NOT EXISTS habitat_state (key TEXT PRIMARY KEY, value_json TEXT NOT NULL)");
+    database
+      .query("INSERT INTO habitat_state (key, value_json) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json")
+      .run(STATE_KEY, JSON.stringify(state));
+    database.run("COMMIT");
+  } catch (error) {
+    database.run("ROLLBACK");
+    throw error;
+  } finally {
+    database.close();
+  }
 }

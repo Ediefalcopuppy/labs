@@ -20,7 +20,7 @@ type StateServiceOptions = {
 };
 
 const EMPTY_POWER: HabitatPowerTick = { powerConsumedTicks: 0 };
-const EMPTY_EVA: EvaState = { deployed: false, x: 0, y: 0, carriedResources: {} };
+const EMPTY_EVA: EvaState = { deployed: false, x: 0, y: 0, carriedResources: {}, maxCarryingCapacityKg: 20 };
 
 export function createEmptyState(): HabitatState {
   return {
@@ -96,6 +96,8 @@ function normalizeRegistration(registration: unknown): HabitatRegistration | und
         ? candidate.lastSeenAt
         : undefined,
     starterHumans: candidate.starterHumans,
+    starterModules: candidate.starterModules,
+    contracts: candidate.contracts,
     contacts: candidate.contacts,
   };
 }
@@ -122,6 +124,7 @@ function normalizeEva(eva: unknown): EvaState {
     x: typeof candidate.x === "number" && Number.isInteger(candidate.x) ? candidate.x : 0,
     y: typeof candidate.y === "number" && Number.isInteger(candidate.y) ? candidate.y : 0,
     carriedResources: normalizeInventory(candidate.carriedResources),
+    maxCarryingCapacityKg: typeof candidate.maxCarryingCapacityKg === "number" && candidate.maxCarryingCapacityKg > 0 ? candidate.maxCarryingCapacityKg : 20,
   };
 }
 

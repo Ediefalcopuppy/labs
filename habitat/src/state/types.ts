@@ -16,6 +16,7 @@ export type EvaState = {
   x: number;
   y: number;
   carriedResources: HabitatInventory;
+  maxCarryingCapacityKg: number;
 };
 
 export type HabitatAlert = {
@@ -38,6 +39,30 @@ export type StarterModuleInstance = {
   connectedTo: string[];
   runtimeAttributes: Record<string, unknown>;
   capabilities: string[];
+};
+
+export type StarterModuleRegistration = {
+  id: string;
+  blueprintId: string;
+  displayName: string;
+  connectedTo: string[];
+  runtimeAttributes: Record<string, unknown>;
+  capabilities: string[];
+};
+
+export type StarterHuman = {
+  id: string;
+  displayName: string;
+  locationModuleId: string;
+};
+
+export type AlertContract = {
+  schemaVersion: string;
+  schema: Record<string, unknown>;
+};
+
+export type RegistrationContracts = {
+  alerts: AlertContract;
 };
 
 export type ConstructionJob = {
@@ -79,8 +104,10 @@ export type HabitatRegistration = {
   catalogVersion?: string;
   remoteStatus?: string;
   lastSeenAt?: string | null;
-  /** Kepler-owned registration fields, retained without narrowing their shape. */
-  starterHumans?: unknown;
+  /** Kepler-owned registration fields supplied by the live registration response. */
+  starterHumans?: StarterHuman[];
+  starterModules?: StarterModuleRegistration[];
+  contracts?: RegistrationContracts;
   contacts?: unknown;
 };
 

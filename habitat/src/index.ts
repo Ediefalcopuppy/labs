@@ -106,6 +106,8 @@ function normalizeRegistration(
         ? registration.lastSeenAt
         : undefined,
     starterHumans: registration.starterHumans,
+    starterModules: registration.starterModules,
+    contracts: registration.contracts,
     contacts: registration.contacts,
   };
 }
@@ -1037,13 +1039,7 @@ program
       program.error(`This directory is already registered as '${data.registration.displayName}'.`);
     }
 
-    const now = new Date().toISOString();
-    data.registration = {
-      displayName: options.name,
-      registeredAt: now,
-      lastSyncedAt: now,
-    };
-    await writeData(data);
+    await postBackendCommand<HabitatState>("/commands/register", { name: options.name });
 
     console.log(`Registered habitat '${options.name}'.`);
   });
@@ -2300,7 +2296,7 @@ humanCommand
   .description("List humans and their locations.")
   .option("--json", "print the complete JSON response")
   .action(async (options: { json?: boolean }) => {
-    const humans = await getBackendCommand<unknown>("/commands/human/list");
+    const humans = await getBackendCommand<unknown>("/humans");
     printBackendPayload(humans, options.json);
   });
 
@@ -2308,7 +2304,7 @@ humanCommand
   .command("move")
   .description("Move a human into a module.")
   .argument("<human-id>", "human id")
-  .argument("<module-id>", "destination module id")
+  .argument("<module-id>", "destination module id or name")
   .action(async (humanId: string, moduleId: string) => {
     const result = await postBackendCommand<unknown>("/commands/human/move", { humanId, moduleId });
     console.log(`Moved human '${humanId}' to module '${moduleId}'.`);
