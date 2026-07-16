@@ -1,5 +1,31 @@
 export type HabitatInventory = Record<string, number>;
 
+export type HabitatHuman = {
+  id: string;
+  name?: string;
+  moduleId?: string;
+  x?: number;
+  y?: number;
+  status?: string;
+  [key: string]: unknown;
+};
+
+export type EvaState = {
+  deployed: boolean;
+  humanId?: string;
+  x: number;
+  y: number;
+  carriedResources: HabitatInventory;
+};
+
+export type HabitatAlert = {
+  id: string;
+  status: "open" | "acknowledged" | string;
+  message?: string;
+  severity?: string;
+  [key: string]: unknown;
+};
+
 export type HabitatPowerTick = {
   powerConsumedTicks: number;
 };
@@ -53,6 +79,9 @@ export type HabitatRegistration = {
   catalogVersion?: string;
   remoteStatus?: string;
   lastSeenAt?: string | null;
+  /** Kepler-owned registration fields, retained without narrowing their shape. */
+  starterHumans?: unknown;
+  contacts?: unknown;
 };
 
 export type HabitatState = {
@@ -64,6 +93,9 @@ export type HabitatState = {
   inventory: HabitatInventory;
   constructionJobs: ConstructionJob[];
   power: HabitatPowerTick;
+  humans: HabitatHuman[];
+  eva: EvaState;
+  alerts: HabitatAlert[];
   registration?: HabitatRegistration;
 };
 

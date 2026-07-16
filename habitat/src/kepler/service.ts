@@ -7,6 +7,8 @@ export type KeplerHabitat = {
   catalogVersion: string;
   status: string;
   lastSeenAt?: string | null;
+  starterHumans?: unknown;
+  contacts?: unknown;
 };
 
 type KeplerHabitatResponse = {
@@ -116,6 +118,8 @@ function normalizeKeplerHabitat(value: Partial<KeplerHabitat>): KeplerHabitat {
       typeof value.lastSeenAt === "string" || value.lastSeenAt === null
         ? value.lastSeenAt
         : undefined,
+    starterHumans: value.starterHumans,
+    contacts: value.contacts,
   };
 }
 

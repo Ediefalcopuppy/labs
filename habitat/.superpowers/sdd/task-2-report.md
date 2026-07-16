@@ -1,24 +1,20 @@
-## Task 2 Report: Move local habitat state into backend storage
+# Task 2 report: backend domain routes
 
-Completed:
+Implemented the local Habitat simulation routes in `src/server/routes.ts`:
 
-- Added a shared habitat state type in `src/state/types.ts`.
-- Added SQLite-backed state storage helpers in `src/state/storage.ts`.
-- Added a state service in `src/state/service.ts` with:
-  - `getState()`
-  - `saveState()`
-  - `resetState()`
-  - normalized empty-state handling
-- Added `/state` read/write/reset handlers in `src/server/routes.ts`.
-- Updated `src/index.ts` to use the new state service and shared normalization path.
-- Added `test/state-service.test.ts` to verify normalized empty state.
+- Human listing and module movement with ID/module validation.
+- EVA status, deployment, adjacent-grid movement, collection, and docking.
+- Alert listing and acknowledgement.
+- Every route emits an action log and persists mutations through `stateService`.
+
+EVA and collection behavior is local-only; no undocumented Kepler write endpoints are called. Deployment starts at the saved human coordinates when those coordinates are integer values, otherwise `(0, 0)`. Collection uses the generic `material` inventory key when local material is represented and clamps collection to the available amount.
 
 Verification:
 
-- `bun test test/state-service.test.ts`
-- `bun run check`
+```text
+bunx tsc -p tsconfig.json --noEmit
+```
 
-Notes:
+Result: passed with no TypeScript errors.
 
-- The existing SQLite wrapper remains the low-level persistence layer.
-- The CLI state migration flow now uses the shared normalization/service path.
+Concerns for CLI integration: mutation routes return the complete normalized Habitat state, while status/list routes return their focused collection/state. The CLI should select the relevant field when rendering mutation responses.

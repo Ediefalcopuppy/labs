@@ -1,16 +1,14 @@
-Task 5 completed.
+# Task 5 report: route CLI link through backend
 
-What changed:
+## Change
 
-- Added `src/client.ts` REST helpers, including `buildBackendUrl()` and JSON/text request wrappers for backend calls.
-- Expanded `src/server/routes.ts` with backend endpoints for the remaining habitat command families, including registration, solar, zones, airlocks, doors, modules, inventory, construction, and debug state changes.
-- Kept the CLI command surface intact while routing the command families through the backend REST layer.
-- Added `test/client.test.ts` to verify the default backend URL.
+Updated `habitat link --id <habitatId>` to call the backend `POST /commands/link` command through `postBackendCommand`. The CLI keeps its existing local-registration guard and prints the linked habitat name and ID from the backend's saved registration response. Kepler lookup and registration materialization therefore remain backend-owned, including `starterHumans` and `contacts.alerts`.
 
-Verification:
+No focused CLI test was added because the existing test harness does not provide an isolated subprocess/backend fixture for Commander command actions; the backend route already has the relevant state behavior covered by the existing suite.
 
-- `bun test test/client.test.ts`
-- `bun test`
-- `bun run check`
+## Verification
 
-Results: all passed.
+- `bun test` — passed (32 tests, 0 failures).
+- `bunx tsc -p tsconfig.json --noEmit` — passed.
+
+The repeated alert acknowledgement behavior remains safely idempotent: acknowledging an already acknowledged alert sets the same status and persists without changing other state.

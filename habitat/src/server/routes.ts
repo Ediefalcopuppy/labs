@@ -59,6 +59,29 @@ function parseIntegerInRange(value: unknown, fieldName: string, min: number, max
   return parsed;
 }
 
+function materializeRegistrationState(
+  data: Awaited<ReturnType<StateService["getState"]>>,
+  starterHumans: unknown,
+  contacts: unknown,
+): void {
+  if (Array.isArray(starterHumans)) {
+    data.humans = starterHumans
+      .filter((human): human is Record<string, unknown> => Boolean(human && typeof human === "object"))
+      .filter((human) => typeof human.id === "string" && human.id.length > 0)
+      .map((human) => ({ ...human, id: human.id as string })) as typeof data.humans;
+  }
+
+  const contactAlerts = contacts && typeof contacts === "object"
+    ? (contacts as Record<string, unknown>).alerts
+    : undefined;
+  if (Array.isArray(contactAlerts)) {
+    data.alerts = contactAlerts
+      .filter((alert): alert is Record<string, unknown> => Boolean(alert && typeof alert === "object"))
+      .filter((alert) => typeof alert.id === "string" && alert.id.length > 0)
+      .map((alert) => ({ ...alert, id: alert.id as string, status: typeof alert.status === "string" ? alert.status : "open" })) as typeof data.alerts;
+  }
+}
+
 export function createApp(stateService: StateService = defaultStateService): Hono {
   const app = new Hono();
   const authService = defaultAuthService;
@@ -146,7 +169,8 @@ export function createApp(stateService: StateService = defaultStateService): Hon
     if (data.registration) throw new Error(`This directory is already registered as '${data.registration.displayName}'.`);
     const habitat = await fetchKeplerHabitatRegistration(id);
     const now = new Date().toISOString();
-    data.registration = { displayName: habitat.displayName, registeredAt: now, lastSyncedAt: now, habitatId: habitat.id, habitatSlug: habitat.habitatSlug, catalogVersion: habitat.catalogVersion, remoteStatus: habitat.status, lastSeenAt: habitat.lastSeenAt ?? null };
+    data.registration = { displayName: habitat.displayName, registeredAt: now, lastSyncedAt: now, habitatId: habitat.id, habitatSlug: habitat.habitatSlug, catalogVersion: habitat.catalogVersion, remoteStatus: habitat.status, lastSeenAt: habitat.lastSeenAt ?? null, starterHumans: habitat.starterHumans, contacts: habitat.contacts };
+    materializeRegistrationState(data, habitat.starterHumans, habitat.contacts);
     return c.json(await stateService.saveState(data));
   });
   app.delete("/commands/unregister", async (c) => {
@@ -218,15 +242,31 @@ export function createApp(stateService: StateService = defaultStateService): Hon
       radiusTiles?: unknown;
       radius?: unknown;
     };
-    const registration = (await stateService.getState()).registration;
+    const data = await stateService.getState();
+    const registration = data.registration;
     if (!registration?.habitatId) {
       throw new Error("Habitat registration must include a habitatId before resource scanning.");
     }
 
+    const hasX = body.x !== undefined;
+    const hasY = body.y !== undefined;
+    if (hasX !== hasY) {
+      throw new Error("x and y must be provided together, or both omitted to use the deployed EVA position.");
+    }
+    const x = hasX && hasY
+      ? parseIntegerInRange(body.x, "x", Number.MIN_SAFE_INTEGER, Number.MAX_SAFE_INTEGER)
+      : (() => {
+          if (!data.eva.deployed) throw new Error("EVA must be deployed before scanning without explicit coordinates.");
+          return data.eva.x;
+        })();
+    const y = hasX && hasY
+      ? parseIntegerInRange(body.y, "y", Number.MIN_SAFE_INTEGER, Number.MAX_SAFE_INTEGER)
+      : data.eva.y;
+
     const scan = await fetchKeplerWorldScan({
       habitatId: registration.habitatId,
-      x: parseIntegerInRange(body.x, "x", Number.MIN_SAFE_INTEGER, Number.MAX_SAFE_INTEGER),
-      y: parseIntegerInRange(body.y, "y", Number.MIN_SAFE_INTEGER, Number.MAX_SAFE_INTEGER),
+      x,
+      y,
       sensorStrength: parseIntegerInRange(body.sensorStrength, "sensorStrength", 0, 100),
       radiusTiles: parseIntegerInRange(body.radiusTiles ?? body.radius ?? 0, "radiusTiles", 0, 5),
     });
@@ -238,6 +278,90 @@ export function createApp(stateService: StateService = defaultStateService): Hon
   app.post("/commands/inventory/set", async (c) => {
     console.log("[action] set inventory");
     return c.json(await runInventorySetCommand({ stateService, ...(await c.req.json()) as { resourceId: string; amount: number } }));
+  });
+
+  app.get("/commands/human/list", async (c) => {
+    console.log("[action] list humans");
+    return c.json((await stateService.getState()).humans);
+  });
+  app.post("/commands/human/move", async (c) => {
+    const body = (await c.req.json()) as { humanId?: unknown; moduleId?: unknown };
+    if (typeof body.humanId !== "string" || body.humanId.length === 0) throw new Error("humanId must be a non-empty string.");
+    if (typeof body.moduleId !== "string" || body.moduleId.length === 0) throw new Error("moduleId must be a non-empty string.");
+    console.log(`[action] move human ${body.humanId} to ${body.moduleId}`);
+    const data = await stateService.getState();
+    const human = requireItem(data.humans, (candidate) => candidate.id === body.humanId, `No human with id '${body.humanId}' exists.`);
+    requireItem(data.modules, (candidate) => candidate.id === body.moduleId || candidate.name === body.moduleId || candidate.displayName === body.moduleId, `No module with id '${body.moduleId}' exists.`);
+    human.moduleId = body.moduleId;
+    return c.json(await stateService.saveState(data));
+  });
+
+  app.get("/commands/eva/status", async (c) => {
+    console.log("[action] inspect EVA status");
+    return c.json((await stateService.getState()).eva);
+  });
+  app.post("/commands/eva/deploy", async (c) => {
+    const body = (await c.req.json()) as { humanId?: unknown };
+    if (typeof body.humanId !== "string" || body.humanId.length === 0) throw new Error("humanId must be a non-empty string.");
+    console.log(`[action] deploy EVA for human ${body.humanId}`);
+    const data = await stateService.getState();
+    if (data.eva.deployed) throw new Error(`EVA is already deployed for human '${data.eva.humanId ?? "unknown"}'.`);
+    const human = requireItem(data.humans, (candidate) => candidate.id === body.humanId, `No human with id '${body.humanId}' exists.`);
+    const x = typeof human.x === "number" && Number.isInteger(human.x) ? human.x : 0;
+    const y = typeof human.y === "number" && Number.isInteger(human.y) ? human.y : 0;
+    data.eva = { deployed: true, humanId: human.id, x, y, carriedResources: {} };
+    human.status = "deployed";
+    return c.json(await stateService.saveState(data));
+  });
+  app.post("/commands/eva/move", async (c) => {
+    const body = (await c.req.json()) as { x?: unknown; y?: unknown };
+    const x = parseIntegerInRange(body.x, "x", Number.MIN_SAFE_INTEGER, Number.MAX_SAFE_INTEGER);
+    const y = parseIntegerInRange(body.y, "y", Number.MIN_SAFE_INTEGER, Number.MAX_SAFE_INTEGER);
+    console.log(`[action] move EVA to (${x}, ${y})`);
+    const data = await stateService.getState();
+    if (!data.eva.deployed) throw new Error("EVA must be deployed before it can move.");
+    if (Math.abs(x - data.eva.x) + Math.abs(y - data.eva.y) !== 1) throw new Error("EVA movement must be to an adjacent grid tile.");
+    data.eva.x = x;
+    data.eva.y = y;
+    return c.json(await stateService.saveState(data));
+  });
+  app.post("/commands/eva/dock", async (c) => {
+    console.log("[action] dock EVA");
+    const data = await stateService.getState();
+    if (!data.eva.deployed) throw new Error("EVA is already docked.");
+    for (const [resourceId, quantity] of Object.entries(data.eva.carriedResources)) {
+      data.inventory[resourceId] = (data.inventory[resourceId] ?? 0) + quantity;
+    }
+    const human = data.eva.humanId ? data.humans.find((candidate) => candidate.id === data.eva.humanId) : undefined;
+    if (human) human.status = "docked";
+    data.eva = { deployed: false, x: 0, y: 0, carriedResources: {} };
+    return c.json(await stateService.saveState(data));
+  });
+  app.post("/commands/collect", async (c) => {
+    const body = (await c.req.json()) as { quantityKg?: unknown };
+    const quantityKg = parseFiniteNumber(body.quantityKg, "quantityKg");
+    if (quantityKg <= 0) throw new Error("quantityKg must be greater than zero.");
+    console.log(`[action] collect ${quantityKg}kg`);
+    const data = await stateService.getState();
+    if (!data.eva.deployed) throw new Error("EVA must be deployed before collecting material.");
+    const available = data.inventory.material;
+    const collectedKg = typeof available === "number" ? Math.min(quantityKg, available) : quantityKg;
+    if (typeof available === "number") data.inventory.material = available - collectedKg;
+    data.eva.carriedResources.material = (data.eva.carriedResources.material ?? 0) + collectedKg;
+    return c.json(await stateService.saveState(data));
+  });
+
+  app.get("/commands/alert/list", async (c) => {
+    console.log("[action] list alerts");
+    return c.json((await stateService.getState()).alerts);
+  });
+  app.post("/commands/alert/:alertId/acknowledge", async (c) => {
+    const alertId = c.req.param("alertId");
+    console.log(`[action] acknowledge alert ${alertId}`);
+    const data = await stateService.getState();
+    const alert = requireItem(data.alerts, (candidate) => candidate.id === alertId, `No alert with id '${alertId}' exists.`);
+    alert.status = "acknowledged";
+    return c.json(await stateService.saveState(data));
   });
   app.get("/commands/construction/list", async (c) => c.json((await stateService.getState()).constructionJobs));
   app.get("/commands/construction/status", async (c) => c.json((await stateService.getState()).constructionJobs));

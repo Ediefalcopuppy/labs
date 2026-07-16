@@ -4,7 +4,7 @@ import { Command, InvalidArgumentError } from "commander";
 import { randomUUID } from "node:crypto";
 import { copyFile, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { getBackendCommand, getBackendState, postBackendCommand, saveBackendState } from "./client";
+import { deleteBackendCommand, getBackendCommand, getBackendState, postBackendCommand, saveBackendState } from "./client";
 import { normalizeState } from "./state/service";
 import { readJsonFile, readSqliteState, writeSqliteState } from "./storage";
 import type {
@@ -20,11 +20,9 @@ import type {
 } from "./state/types";
 import {
   fetchKeplerBlueprintCatalog,
-  fetchKeplerHabitatRegistration,
   fetchKeplerResourceCatalog,
   fetchKeplerSolarIrradiance,
   type KeplerBlueprintCatalogEntry,
-  type KeplerHabitat,
   type KeplerResourceCatalogEntry,
 } from "./kepler-client";
 import {
@@ -107,22 +105,8 @@ function normalizeRegistration(
       typeof registration.lastSeenAt === "string" || registration.lastSeenAt === null
         ? registration.lastSeenAt
         : undefined,
-  };
-}
-
-function linkedRegistrationFromHabitat(
-  habitat: KeplerHabitat,
-  linkedAt: string,
-): HabitatRegistration {
-  return {
-    displayName: habitat.displayName,
-    registeredAt: linkedAt,
-    lastSyncedAt: linkedAt,
-    habitatId: habitat.id,
-    habitatSlug: habitat.habitatSlug,
-    catalogVersion: habitat.catalogVersion,
-    remoteStatus: habitat.status,
-    lastSeenAt: habitat.lastSeenAt ?? null,
+    starterHumans: registration.starterHumans,
+    contacts: registration.contacts,
   };
 }
 
@@ -145,6 +129,11 @@ function formatRegistrationDetails(payload: {
     if (registration.catalogVersion) lines.push(`${paint("  catalog version:", color.bold, color.cyan)} ${paint(registration.catalogVersion, color.green)}`);
     if (registration.remoteStatus) lines.push(`${paint("  remote status:", color.bold, color.cyan)} ${paint(registration.remoteStatus, color.green)}`);
     if (registration.lastSeenAt) lines.push(`${paint("  last seen at:", color.bold, color.cyan)} ${paint(registration.lastSeenAt, color.green)}`);
+    for (const [key, value] of [["starter humans", registration.starterHumans], ["contacts", registration.contacts]] as const) {
+      if (value === undefined) continue;
+      lines.push(`${paint(`  ${key}:`, color.bold, color.cyan)}`);
+      lines.push(...formatObjectLines(value, 4));
+    }
   }
 
   if (kepler && typeof kepler === "object") {
@@ -1080,12 +1069,13 @@ Examples:
       program.error(`This directory is already registered as '${data.registration.displayName}'.`);
     }
 
-    const habitat = await fetchKeplerHabitatRegistration(options.id);
-    const now = new Date().toISOString();
-    data.registration = linkedRegistrationFromHabitat(habitat, now);
-    await writeData(data);
+    const result = await postBackendCommand<HabitatState>("/commands/link", { id: options.id });
+    const registration = result.registration;
+    if (!registration?.habitatId) {
+      throw new Error("Backend link response did not include a habitat registration.");
+    }
 
-    console.log(`Linked habitat '${habitat.displayName}' (${habitat.id}).`);
+    console.log(`Linked habitat '${registration.displayName}' (${registration.habitatId}).`);
   });
 
 program
@@ -1171,6 +1161,18 @@ Examples:
       }
       if (data.registration.lastSeenAt) {
         console.log(`Last seen at: ${data.registration.lastSeenAt}`);
+      }
+      if (data.registration.starterHumans !== undefined) {
+        console.log("Starter humans:");
+        for (const line of formatObjectLines(data.registration.starterHumans, 2)) {
+          console.log(line);
+        }
+      }
+      if (data.registration.contacts !== undefined) {
+        console.log("Contacts:");
+        for (const line of formatObjectLines(data.registration.contacts, 2)) {
+          console.log(line);
+        }
       }
       console.log(`Registered at: ${data.registration.registeredAt}`);
       console.log(`Last synced at: ${data.registration.lastSyncedAt}`);
@@ -2013,15 +2015,7 @@ moduleCommand
   .description("Delete a module.")
   .argument("<name>", "module name, id, or display name")
   .action(async (name: string) => {
-    const data = await readData();
-    const nextModules = data.modules.filter((module) => module.displayName !== name);
-
-    if (nextModules.length === data.modules.length) {
-      program.error(`No module named '${name}' exists.`);
-    }
-
-    data.modules = nextModules;
-    await writeData(data);
+    await deleteBackendCommand(`/commands/module/${encodeURIComponent(name)}`);
 
     console.log(`Deleted module '${name}'.`);
   });
@@ -2224,14 +2218,14 @@ resourceCommand
 resourceCommand
   .command("scan")
   .description("Scan the world through the backend.")
-  .requiredOption("--x <integer>", "current x coordinate", (value) => parseInteger(value, "x"))
-  .requiredOption("--y <integer>", "current y coordinate", (value) => parseInteger(value, "y"))
+  .option("--x <integer>", "current x coordinate", (value) => parseInteger(value, "x"))
+  .option("--y <integer>", "current y coordinate", (value) => parseInteger(value, "y"))
   .requiredOption("--strength <0-100>", "effective sensor strength", (value) =>
     parseIntegerInRange(value, "strength", 0, 100),
   )
   .option("--radius <0-5>", "scan radius, default 0", (value) => parseIntegerInRange(value, "radius", 0, 5), 0)
   .option("--json", "print the complete JSON response")
-  .action(async (options: { x: number; y: number; strength: number; radius: number; json?: boolean }) => {
+  .action(async (options: { x?: number; y?: number; strength: number; radius: number; json?: boolean }) => {
     const scan = await postBackendCommand<unknown>("/commands/resource/scan", {
       x: options.x,
       y: options.y,
@@ -2259,14 +2253,14 @@ program.addCommand(resourceCommand);
 
 const scanCommand = new Command("scan")
   .description("Scan the world through the backend.")
-  .requiredOption("--x <integer>", "current x coordinate", (value) => parseInteger(value, "x"))
-  .requiredOption("--y <integer>", "current y coordinate", (value) => parseInteger(value, "y"))
+  .option("--x <integer>", "current x coordinate", (value) => parseInteger(value, "x"))
+  .option("--y <integer>", "current y coordinate", (value) => parseInteger(value, "y"))
   .requiredOption("--strength <0-100>", "effective sensor strength", (value) =>
     parseIntegerInRange(value, "strength", 0, 100),
   )
   .option("--radius <0-5>", "scan radius, default 0", (value) => parseIntegerInRange(value, "radius", 0, 5), 0)
   .option("--json", "print the complete JSON response")
-  .action(async (options: { x: number; y: number; strength: number; radius: number; json?: boolean }) => {
+  .action(async (options: { x?: number; y?: number; strength: number; radius: number; json?: boolean }) => {
     const scan = await postBackendCommand<unknown>("/commands/resource/scan", {
       x: options.x,
       y: options.y,
@@ -2285,6 +2279,124 @@ const scanCommand = new Command("scan")
   });
 
 program.addCommand(scanCommand);
+
+function printBackendPayload(payload: unknown, json = false): void {
+  if (json) {
+    console.log(JSON.stringify(payload, null, 2));
+    return;
+  }
+
+  for (const line of formatObjectLines(payload)) {
+    console.log(line);
+  }
+}
+
+const humanCommand = new Command("human")
+  .description("Manage habitat humans.")
+  .showHelpAfterError("Try 'habitat human --help' to see human commands.");
+
+humanCommand
+  .command("list")
+  .description("List humans and their locations.")
+  .option("--json", "print the complete JSON response")
+  .action(async (options: { json?: boolean }) => {
+    const humans = await getBackendCommand<unknown>("/commands/human/list");
+    printBackendPayload(humans, options.json);
+  });
+
+humanCommand
+  .command("move")
+  .description("Move a human into a module.")
+  .argument("<human-id>", "human id")
+  .argument("<module-id>", "destination module id")
+  .action(async (humanId: string, moduleId: string) => {
+    const result = await postBackendCommand<unknown>("/commands/human/move", { humanId, moduleId });
+    console.log(`Moved human '${humanId}' to module '${moduleId}'.`);
+    if (result && typeof result === "object" && "humans" in result) {
+      const human = (result as { humans?: Array<{ id?: string; moduleId?: string }> }).humans?.find((candidate) => candidate.id === humanId);
+      if (human) console.log(`Current module: ${human.moduleId ?? moduleId}`);
+    }
+  });
+
+program.addCommand(humanCommand);
+
+const evaCommand = new Command("eva")
+  .description("Manage the EVA explorer.")
+  .showHelpAfterError("Try 'habitat eva --help' to see EVA commands.");
+
+evaCommand
+  .command("status")
+  .description("Show explorer position and carried resources.")
+  .option("--json", "print the complete JSON response")
+  .action(async (options: { json?: boolean }) => {
+    const eva = await getBackendCommand<unknown>("/commands/eva/status");
+    printBackendPayload(eva, options.json);
+  });
+
+evaCommand
+  .command("deploy")
+  .description("Deploy one human from the suitport.")
+  .argument("<human-id>", "human id")
+  .action(async (humanId: string) => {
+    await postBackendCommand<unknown>("/commands/eva/deploy", { humanId });
+    console.log(`Deployed EVA for human '${humanId}'.`);
+  });
+
+evaCommand
+  .command("move")
+  .description("Move the EVA one adjacent grid tile.")
+  .argument("<x>", "destination x coordinate", (value) => parseInteger(value, "x"))
+  .argument("<y>", "destination y coordinate", (value) => parseInteger(value, "y"))
+  .action(async (x: number, y: number) => {
+    const eva = await postBackendCommand<unknown>("/commands/eva/move", { x, y });
+    console.log(`Moved EVA to (${x}, ${y}).`);
+    if (eva && typeof eva === "object" && "x" in eva && "y" in eva) {
+      console.log(`Position: (${String((eva as { x: unknown }).x)}, ${String((eva as { y: unknown }).y)})`);
+    }
+  });
+
+evaCommand
+  .command("dock")
+  .description("Dock at (0, 0) and unload carried resources.")
+  .action(async () => {
+    await postBackendCommand<unknown>("/commands/eva/dock");
+    console.log("Docked EVA at (0, 0) and unloaded carried resources.");
+  });
+
+program.addCommand(evaCommand);
+
+program
+  .command("collect")
+  .description("Collect material at the current EVA position.")
+  .argument("<quantity-kg>", "quantity in kilograms", parseInventoryAmount)
+  .action(async (quantityKg: number) => {
+    await postBackendCommand<unknown>("/commands/collect", { quantityKg });
+    console.log(`Collected ${quantityKg} kg.`);
+  });
+
+const alertCommand = new Command("alert")
+  .description("Inspect and acknowledge habitat alerts.")
+  .showHelpAfterError("Try 'habitat alert --help' to see alert commands.");
+
+alertCommand
+  .command("list")
+  .description("List persisted alerts and their statuses.")
+  .option("--json", "print the complete JSON response")
+  .action(async (options: { json?: boolean }) => {
+    const alerts = await getBackendCommand<unknown>("/commands/alert/list");
+    printBackendPayload(alerts, options.json);
+  });
+
+alertCommand
+  .command("acknowledge")
+  .description("Acknowledge one alert.")
+  .argument("<alert-id>", "alert id")
+  .action(async (alertId: string) => {
+    await postBackendCommand<unknown>(`/commands/alert/${encodeURIComponent(alertId)}/acknowledge`);
+    console.log(`Acknowledged alert '${alertId}'.`);
+  });
+
+program.addCommand(alertCommand);
 
 const inventoryCommand = new Command("inventory")
   .description("Manage habitat inventory.")

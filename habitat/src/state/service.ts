@@ -7,6 +7,9 @@ import type {
   HabitatPowerTick,
   HabitatRegistration,
   HabitatState,
+  HabitatAlert,
+  HabitatHuman,
+  EvaState,
   PartialHabitatState,
   StarterModuleInstance,
   Zone,
@@ -17,6 +20,7 @@ type StateServiceOptions = {
 };
 
 const EMPTY_POWER: HabitatPowerTick = { powerConsumedTicks: 0 };
+const EMPTY_EVA: EvaState = { deployed: false, x: 0, y: 0, carriedResources: {} };
 
 export function createEmptyState(): HabitatState {
   return {
@@ -28,6 +32,9 @@ export function createEmptyState(): HabitatState {
     inventory: {},
     constructionJobs: [],
     power: { ...EMPTY_POWER },
+    humans: [],
+    eva: { ...EMPTY_EVA, carriedResources: {} },
+    alerts: [],
   };
 }
 
@@ -88,7 +95,43 @@ function normalizeRegistration(registration: unknown): HabitatRegistration | und
       typeof candidate.lastSeenAt === "string" || candidate.lastSeenAt === null
         ? candidate.lastSeenAt
         : undefined,
+    starterHumans: candidate.starterHumans,
+    contacts: candidate.contacts,
   };
+}
+
+function normalizeHumans(humans: unknown): HabitatHuman[] {
+  if (!Array.isArray(humans)) return [];
+  return humans.filter((human): human is HabitatHuman => {
+    const id = human && typeof human === "object" ? (human as Record<string, unknown>).id : undefined;
+    return Boolean(
+      human &&
+        typeof human === "object" &&
+        typeof id === "string" &&
+        id.length > 0,
+    );
+  });
+}
+
+function normalizeEva(eva: unknown): EvaState {
+  if (!eva || typeof eva !== "object") return { ...EMPTY_EVA, carriedResources: {} };
+  const candidate = eva as Partial<EvaState>;
+  return {
+    deployed: typeof candidate.deployed === "boolean" ? candidate.deployed : false,
+    humanId: typeof candidate.humanId === "string" && candidate.humanId.length > 0 ? candidate.humanId : undefined,
+    x: typeof candidate.x === "number" && Number.isInteger(candidate.x) ? candidate.x : 0,
+    y: typeof candidate.y === "number" && Number.isInteger(candidate.y) ? candidate.y : 0,
+    carriedResources: normalizeInventory(candidate.carriedResources),
+  };
+}
+
+function normalizeAlerts(alerts: unknown): HabitatAlert[] {
+  if (!Array.isArray(alerts)) return [];
+  return alerts.filter((alert): alert is HabitatAlert => {
+    if (!alert || typeof alert !== "object") return false;
+    const candidate = alert as Record<string, unknown>;
+    return typeof candidate.id === "string" && candidate.id.length > 0 && typeof candidate.status === "string";
+  });
 }
 
 export function normalizeState(state: unknown): HabitatState {
@@ -117,6 +160,9 @@ export function normalizeState(state: unknown): HabitatState {
                 : 0,
           }
         : { ...EMPTY_POWER },
+    humans: normalizeHumans(candidate.humans),
+    eva: normalizeEva(candidate.eva),
+    alerts: normalizeAlerts(candidate.alerts),
     registration: normalizeRegistration(candidate.registration),
   };
 }

@@ -1,26 +1,33 @@
-Task 4 completed.
+# Task 4 verification report
 
-What changed:
+## Scope
 
-- Added focused domain modules for inventory, modules, power, and construction rules.
-- Added `src/domain/commands.ts` with backend command handlers for `construct`, `module/create`, `inventory/set`, `module/set-status`, and `tick`.
-- Wired `src/server/routes.ts` to expose the new `/commands/*` endpoints.
-- Updated `src/index.ts` to reuse the shared inventory rules from the new domain module.
-- Added the requested inventory rule test at `test/domain-commands.test.ts`.
+Verified state normalization and the new human/EVA/alert routes and CLI command groups. The focused tests cover:
 
-Verification:
+- registration defaults while retaining `starterHumans` and `contacts`;
+- rejection of non-adjacent EVA movement;
+- rejection of zero and negative collection quantities;
+- persistence of an acknowledged alert.
 
-- `bun test test/domain-commands.test.ts`
-- `bun test`
+The existing Bun test harness was present, so a focused test file was added at `test/human-eva-alerts.test.ts`.
 
-Both passed.
+## Commands and results
 
-Fix update:
+- `bun test test/human-eva-alerts.test.ts` — **passed** (4 tests, 14 expectations).
+- `bun test` — **passed** (32 tests, 83 expectations, 0 failures).
+- `bunx tsc -p tsconfig.json --noEmit` — **passed** (no diagnostics).
+- `bun run src/index.ts --help` — **passed**; lists `human`, `eva`, `collect`, and `alert`.
+- `bun run src/index.ts human --help` — **passed**; lists `list` and `move`.
+- `bun run src/index.ts eva --help` — **passed**; lists `status`, `deploy`, `move`, and `dock`.
+- `bun run src/index.ts alert --help` — **passed**; lists `list` and `acknowledge`.
 
-- Restored the backend tick command to match the prior CLI simulation loop: per-module power-consumption counters, solar charging, battery drain/charge accounting, and construction advancement now run in the backend domain handler again.
-- Removed the backend-only duplicate-blueprint guard from `construct`, so repeated jobs can start as long as a free matching facility exists, consistent with the previous CLI behavior.
+## Registration materialization
 
-Verification run for this fix:
+Inspection found that linking previously saved `starterHumans` and `contacts` only on the registration record. The link route now also materializes valid `starterHumans` entries into top-level `state.humans`, and `contacts.alerts` entries into top-level `state.alerts` (defaulting an omitted alert status to `open`). It also retains both fields on the saved registration. This makes the human and alert commands usable immediately after linking.
 
-- `bun test test/domain-commands.test.ts` — passed.
-- `bun test` — passed.
+The link route was not exercised against live Kepler in this verification run because that requires the configured remote service; the materialization path is covered by code inspection and the state normalization tests cover the retained registration fields.
+
+## Concerns
+
+- Kepler payloads with malformed starter-human or alert entries are ignored by the materialization filters; valid entries must have a non-empty `id`.
+- Route validation currently reports domain validation failures as HTTP 500 through the existing app-wide error handler. This matches the existing backend behavior but could later be changed to 400 responses if desired.

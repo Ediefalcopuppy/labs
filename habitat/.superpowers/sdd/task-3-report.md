@@ -1,20 +1,23 @@
-## Task 3 Report: Move Kepler integration behind backend services
+# Task 3 report: CLI command wiring
 
-Completed:
+Implemented the backend-only Commander wiring in `src/index.ts` for:
 
-- Added a backend Kepler client in `src/kepler/client.ts` that is responsible for the actual HTTP calls to `planet.turingguild.com`.
-- Added a backend Kepler service in `src/kepler/service.ts` that normalizes blueprint, resource, solar, and habitat-registration responses.
-- Added backend Kepler routes in `src/server/routes.ts` so catalog reads, solar fetches, and habitat registration flow through the server layer.
-- Converted `src/kepler-client.ts` into a frontend/backend proxy client that talks to the local Habitat backend instead of Kepler directly.
-- Updated shared Kepler type imports in `src/construction.ts` and `src/state/types.ts` to use the new service boundary.
-- Added `test/kepler-service.test.ts` to verify blueprint normalization.
+- `human list` and `human move <human-id> <module-id>`
+- `eva status`, `eva deploy <human-id>`, `eva move <x> <y>`, and `eva dock`
+- `collect <quantity-kg>`
+- `alert list` and `alert acknowledge <alert-id>`
+
+All new commands use `getBackendCommand` or `postBackendCommand`; no direct state or Kepler transport was added. List/status commands accept `--json`. Human-readable output uses the existing object formatter and color helpers. Registration details and `status` now render saved `starterHumans` and `contacts` fields while retaining the live Kepler payload.
 
 Verification:
 
-- `bun test test/kepler-service.test.ts`
-- `bun run check`
+- `bunx tsc -p tsconfig.json --noEmit` passed.
+- `bun src/index.ts human --help` passed.
+- `bun src/index.ts eva --help` passed.
+- `bun src/index.ts alert --help` passed.
+- `bun src/index.ts collect --help` passed.
 
 Notes:
 
-- The backend server is now the only code path that reaches `planet.turingguild.com`.
-- The CLI-facing `kepler-client.ts` now depends on backend routes rather than Kepler’s external API.
+- Backend mutation responses are intentionally treated as opaque; the CLI prints concise success messages so command wiring remains transport-focused.
+- Quantity parsing accepts finite non-negative numbers; the backend enforces the strictly-positive collection rule.

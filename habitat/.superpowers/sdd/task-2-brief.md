@@ -1,54 +1,11 @@
-### Task 2: Move local habitat state into backend storage
+# Task 2: Backend domain routes
 
-**Files:**
-- Create: `src/state/types.ts`
-- Create: `src/state/storage.ts`
-- Create: `src/state/service.ts`
-- Modify: `src/server/routes.ts`
-- Modify: `src/index.ts`
-- Modify: `src/storage.ts`
+Modify `src/server/routes.ts` only unless a small focused backend module is needed.
 
-**Interfaces:**
-- Consumes: habitat state shape, SQLite access, state service methods
-- Produces: `getState()`, `saveState()`, `resetState()`, and HTTP handlers for state reads/writes
+Add backend routes for persisted Habitat simulation:
+- GET `/commands/human/list`, POST `/commands/human/move` with `{humanId,moduleId}`.
+- GET `/commands/eva/status`, POST `/commands/eva/deploy` with `{humanId}`, POST `/commands/eva/move` with `{x,y}`, POST `/commands/eva/dock`.
+- POST `/commands/collect` with `{quantityKg}`; require deployed EVA and a positive finite quantity, decrementing no more than available local material if represented.
+- GET `/commands/alert/list`, POST `/commands/alert/:alertId/acknowledge`.
 
-- [ ] **Step 1: Write the failing test**
-
-Create `test/state-service.test.ts`:
-
-```ts
-import { describe, expect, test } from "bun:test";
-import { createStateService } from "../src/state/service";
-
-describe("state service", () => {
-  test("starts with empty normalized state", async () => {
-    const service = createStateService({ storagePath: ":memory:" });
-    const state = await service.getState();
-    expect(state.modules).toEqual([]);
-    expect(state.inventory).toEqual({});
-    expect(state.constructionJobs).toEqual([]);
-  });
-});
-```
-
-- [ ] **Step 2: Run test to verify it fails**
-
-Run: `bun test test/state-service.test.ts`
-Expected: fail because `src/state/service` does not exist yet.
-
-- [ ] **Step 3: Write minimal implementation**
-
-Create the shared habitat state type file, move SQLite read/write logic into `src/state/storage.ts`, and wrap it in a state service that normalizes empty state and persists through SQLite.
-
-- [ ] **Step 4: Run test to verify it passes**
-
-Run: `bun test test/state-service.test.ts`
-Expected: pass and return normalized empty state.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add src/state/types.ts src/state/storage.ts src/state/service.ts test/state-service.test.ts src/server/routes.ts src/index.ts src/storage.ts
-git commit -m "feat: move habitat state into backend"
-```
-
+Use the types/defaults in `src/state/types.ts`. Movement must be grid-adjacent (Manhattan distance 1) and EVA deployment must select an existing human and reject duplicate deployment. Docking returns EVA to `(0,0)`, clears deployment, and unloads carried resources into inventory. Every route must log an action and persist via `stateService`. Keep all behavior local; do not call undocumented Kepler write endpoints. Run `bunx tsc -p tsconfig.json --noEmit` and write `.superpowers/sdd/task-2-report.md`.
