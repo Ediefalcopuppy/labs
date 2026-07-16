@@ -61,6 +61,21 @@ function parseIntegerInRange(value: unknown, fieldName: string, min: number, max
   return parsed;
 }
 
+function upsertAlert(data: Awaited<ReturnType<StateService["getState"]>>, input: { code: string; title: string; description: string; severity: "warning" | "critical"; subject?: { type: "human"; id: string } }) {
+  const now = new Date().toISOString();
+  const existing = data.alerts.find((alert) => alert.code === input.code && alert.status === "open" && JSON.stringify(alert.subject) === JSON.stringify(input.subject));
+  if (existing) {
+    Object.assign(existing, { ...input, lastObservedAt: now, occurrenceCount: typeof existing.occurrenceCount === "number" ? existing.occurrenceCount + 1 : 2 });
+    return;
+  }
+  data.alerts.push({ id: randomUUID(), ...input, source: "eva", status: "open", openedAt: now, lastObservedAt: now, occurrenceCount: 1 });
+}
+
+function resolveEvaAlert(data: Awaited<ReturnType<StateService["getState"]>>, code: string) {
+  const now = new Date().toISOString();
+  for (const alert of data.alerts) if (alert.code === code && alert.status === "open") Object.assign(alert, { status: "resolved", resolvedAt: now, lastObservedAt: now });
+}
+
 function materializeRegistrationState(
   data: Awaited<ReturnType<StateService["getState"]>>,
   starterModules: StarterModuleRegistration[] | undefined,
@@ -376,6 +391,7 @@ export function createApp(stateService: StateService = defaultStateService): Hon
     if (!suitport || human.moduleId !== suitport.id) throw new Error("The selected human must be inside the registered suitport before EVA deployment.");
     data.eva = { deployed: true, humanId: human.id, x: 0, y: 0, carriedResources: {}, maxCarryingCapacityKg: data.eva.maxCarryingCapacityKg };
     human.status = "deployed";
+    upsertAlert(data, { code: "eva-human-deployed", title: "Human deployed outside habitat", description: `${human.name ?? human.id} is on EVA outside the habitat.`, severity: "warning", subject: { type: "human", id: human.id } });
     return c.json(await stateService.saveState(data));
   });
   app.post("/commands/eva/move", async (c) => {
@@ -403,6 +419,8 @@ export function createApp(stateService: StateService = defaultStateService): Hon
     }
     const human = data.eva.humanId ? data.humans.find((candidate) => candidate.id === data.eva.humanId) : undefined;
     if (human) human.status = "docked";
+    resolveEvaAlert(data, "eva-human-deployed");
+    resolveEvaAlert(data, "eva-carrying-capacity-reached");
     data.eva = { deployed: false, x: 0, y: 0, carriedResources: {}, maxCarryingCapacityKg: data.eva.maxCarryingCapacityKg };
     return c.json(await stateService.saveState(data));
   });
@@ -416,8 +434,16 @@ export function createApp(stateService: StateService = defaultStateService): Hon
     if (!data.registration?.habitatId) throw new Error("Habitat registration must include a habitatId before collecting material.");
     const carriedKg = Object.values(data.eva.carriedResources).reduce((total, amount) => total + amount, 0);
     if (carriedKg + quantityKg > data.eva.maxCarryingCapacityKg) throw new Error("Requested collection exceeds EVA carrying capacity.");
-    const collection = await collectKeplerWorldResource({ habitatId: data.registration.habitatId, x: data.eva.x, y: data.eva.y, quantityKg });
+    let collection: { resourceType: string; collectedKg: number };
+    try {
+      collection = await collectKeplerWorldResource({ habitatId: data.registration.habitatId, x: data.eva.x, y: data.eva.y, quantityKg });
+    } catch (error) {
+      upsertAlert(data, { code: "eva-collection-failed", title: "EVA collection failed", description: error instanceof Error ? error.message : "Kepler rejected the collection attempt.", severity: "warning", subject: data.eva.humanId ? { type: "human", id: data.eva.humanId } : undefined });
+      await stateService.saveState(data);
+      throw error;
+    }
     data.eva.carriedResources[collection.resourceType] = (data.eva.carriedResources[collection.resourceType] ?? 0) + collection.collectedKg;
+    if (Object.values(data.eva.carriedResources).reduce((total, amount) => total + amount, 0) >= data.eva.maxCarryingCapacityKg) upsertAlert(data, { code: "eva-carrying-capacity-reached", title: "EVA carrying capacity reached", description: "The EVA satchel is full and must be returned to the habitat.", severity: "warning", subject: data.eva.humanId ? { type: "human", id: data.eva.humanId } : undefined });
     return c.json(await stateService.saveState(data));
   });
 
