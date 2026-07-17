@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import { buildCommandRequest, getCommandById } from "../web/src/commands";
 import { routeFromHash, viewToHash } from "../web/src/routes";
-import { commandPayload, constructionProgress, isDoomEasterEgg, materialEntries, notificationSummary, resourceScanPayload } from "../web/src/ui-format";
+import { clockTickChanged, commandPayload, constructionProgress, isDoomEasterEgg, materialEntries, notificationSummary, resourceScanPayload } from "../web/src/ui-format";
 
 describe("web routes", () => {
   test("round-trips a view through the hash route", () => {
@@ -107,5 +107,13 @@ describe("resource scanning", () => {
   test("uses explicit coordinates unless the deployed EVA position is selected", () => {
     expect(resourceScanPayload({ x: "12", y: "-4", sensorStrength: "70", radiusTiles: "2", useEvaPosition: false })).toEqual({ x: 12, y: -4, sensorStrength: 70, radiusTiles: 2 });
     expect(resourceScanPayload({ x: "12", y: "-4", sensorStrength: "70", radiusTiles: "2", useEvaPosition: true })).toEqual({ sensorStrength: 70, radiusTiles: 2 });
+  });
+});
+
+describe("live clock updates", () => {
+  test("detects a newly reported backend tick", () => {
+    expect(clockTickChanged(null, 12)).toBe(true);
+    expect(clockTickChanged(12, 12)).toBe(false);
+    expect(clockTickChanged(12, null)).toBe(false);
   });
 });

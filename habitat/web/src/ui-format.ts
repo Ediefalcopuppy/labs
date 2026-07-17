@@ -34,6 +34,10 @@ export function resourceScanPayload(values: { x: string; y: string; sensorStreng
   return payload;
 }
 
+export function clockTickChanged(previousTick: number | null, nextTick: number | null): boolean {
+  return nextTick !== null && nextTick !== previousTick;
+}
+
 export type ConstructionProgress = {
   remainingBuildTicks: unknown;
   totalBuildTicks: unknown;
