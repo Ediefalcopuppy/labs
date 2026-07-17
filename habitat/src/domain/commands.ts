@@ -2,8 +2,9 @@ import { randomUUID } from "node:crypto";
 import type { StateService } from "../state/service";
 import { fetchKeplerBlueprintCatalog, fetchKeplerSolarIrradiance } from "../kepler/service";
 import { spendInventoryMaterials } from "./inventory";
-import { forceConstructionStart, planConstructionStart, advanceConstructionTick } from "./construction";
+import { forceConstructionStart, planConstructionStart } from "./construction";
 import { setModuleStatus } from "./modules";
+import { advanceSimulation } from "./simulation";
 
 export async function runConstructCommand(params: {
   stateService: StateService;
@@ -111,19 +112,9 @@ export async function runTickCommand(params: {
   getIrradiance?: () => Promise<number>;
 }) {
   const data = await params.stateService.getState();
-  const completedJobs: string[] = [];
-  let advancedConstructionTicks = 0;
-  let pausedConstructionTicks = 0;
-  let energyCost = 0;
   const getIrradiance = params.getIrradiance ?? fetchKeplerSolarIrradiance;
   const irradiance = await getIrradiance();
-  for (let step = 0; step < params.count; step += 1) {
-    const result = advanceConstructionTick(data, irradiance);
-    energyCost += result.energyCost;
-    advancedConstructionTicks += result.advancedConstructionTicks;
-    pausedConstructionTicks += result.pausedConstructionTicks;
-    completedJobs.push(...result.completedJobs);
-  }
+  const result = advanceSimulation(data, params.count, irradiance);
   await params.stateService.saveState(data);
-  return { completedJobs, advancedConstructionTicks, pausedConstructionTicks, energyCost, data };
+  return result;
 }

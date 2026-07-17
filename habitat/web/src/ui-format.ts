@@ -1,5 +1,18 @@
 export type MaterialInput = Record<string, unknown> | null | undefined;
 
+const NUMERIC_COMMAND_FIELDS = new Set(["amount", "count"]);
+
+export function commandPayload(values: Record<string, string>): Record<string, string | number> {
+  return Object.fromEntries(Object.entries(values).map(([field, value]) => [
+    field,
+    NUMERIC_COMMAND_FIELDS.has(field) ? Number(value) : value,
+  ]));
+}
+
+export function isNumericCommandField(field: string): boolean {
+  return NUMERIC_COMMAND_FIELDS.has(field);
+}
+
 export function isDoomEasterEgg(query: string): boolean {
   return query.trim().toUpperCase() === "DOOM1234";
 }

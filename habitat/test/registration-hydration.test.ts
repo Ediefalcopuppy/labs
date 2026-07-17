@@ -1,6 +1,10 @@
 import { describe, expect, test } from "bun:test";
+import type { RegistrationStorage } from "../src/registration/service";
 import { createApp } from "../src/server";
 import { normalizeState } from "../src/state/service";
+import type { HabitatState } from "../src/state/types";
+
+const STREAM_TOKEN = "fixture-habitat-stream-token";
 
 function createMemoryStateService(initial: unknown = {}) {
   let state = normalizeState(initial);
@@ -19,6 +23,28 @@ function createMemoryStateService(initial: unknown = {}) {
   };
 }
 
+function createMemoryRegistrationStorage(
+  stateService: ReturnType<typeof createMemoryStateService>,
+): RegistrationStorage {
+  const tokens = new Map<string, string>();
+  return {
+    async deleteRegistration() {
+      const next = await stateService.getState();
+      delete next.registration;
+      tokens.clear();
+      return stateService.saveState(next);
+    },
+    async getRegistrationToken(habitatId) {
+      return tokens.get(habitatId);
+    },
+    async saveRegistration(next, streamToken) {
+      const saved = await stateService.saveState(next);
+      tokens.set(saved.registration!.habitatId!, streamToken);
+      return saved;
+    },
+  };
+}
+
 function registrationResponse() {
   const starterModules = Array.from({ length: 6 }, (_, index) => ({
     id: `module-${index + 1}`,
@@ -31,15 +57,17 @@ function registrationResponse() {
   return {
     habitatId: "habitat-1",
     streamUrl: "wss://planet.turingguild.com/planet/stream",
-    apiToken: "never-store-this",
-    stream: { protocolVersion: "1.0", subscriptions: ["ticks"], currentTick: 0, tickIntervalMs: 1000, ticksPerPulse: 1, status: "paused" },
+    apiToken: STREAM_TOKEN,
+    stream: { protocolVersion: "1.0", subscriptions: ["ticks"], currentTick: 800, tickIntervalMs: 1000, ticksPerPulse: 10, status: "paused" },
     contracts: { alerts: { schemaVersion: "1.0", schema: { type: "object" } } },
     starterModules,
     starterHumans: [
       { id: "human-1", displayName: "Avery", locationModuleId: "module-1" },
       { id: "human-2", displayName: "Blake", locationModuleId: "module-2" },
     ],
-    blueprints: [],
+    blueprints: [
+      { id: "blueprint-1", name: "Starter Core", inputs: { regolith: 2 } },
+    ],
   };
 }
 
@@ -69,7 +97,8 @@ async function withKeplerRegistrationResponse(run: () => Promise<void>) {
 describe("registration hydration", () => {
   test("persists all starter modules and humans from one Kepler registration", async () => {
     const stateService = createMemoryStateService();
-    const app = createApp(stateService as never);
+    const registrationStorage = createMemoryRegistrationStorage(stateService);
+    const app = createApp(stateService as never, registrationStorage);
 
     await withKeplerRegistrationResponse(async () => {
       const response = await app.request("/commands/register", {
@@ -89,10 +118,17 @@ describe("registration hydration", () => {
     expect(state.registration).toEqual(expect.objectContaining({
       displayName: "Habitat One",
       habitatId: "habitat-1",
+      habitatUuid: expect.any(String),
+      streamUrl: "wss://planet.turingguild.com/planet/stream",
+      stream: expect.objectContaining({ subscriptions: ["ticks"], currentTick: 800 }),
       starterModules: expect.any(Array),
       starterHumans: expect.any(Array),
     }));
-    expect(JSON.stringify(state)).not.toContain("never-store-this");
+    expect(state.blueprints).toEqual([
+      expect.objectContaining({ blueprintId: "blueprint-1", displayName: "Starter Core" }),
+    ]);
+    expect(await registrationStorage.getRegistrationToken("habitat-1")).toBe(STREAM_TOKEN);
+    expect(JSON.stringify(state)).not.toContain(STREAM_TOKEN);
   });
 
   test("leaves state unchanged when registration persistence fails", async () => {
@@ -102,7 +138,14 @@ describe("registration hydration", () => {
       async saveState() { throw new Error("simulated SQLite failure"); },
       async resetState() { return structuredClone(initial); },
     };
-    const app = createApp(stateService as never);
+    const registrationStorage: RegistrationStorage = {
+      async deleteRegistration() { return stateService.getState(); },
+      async getRegistrationToken() { return undefined; },
+      async saveRegistration(next) {
+        return stateService.saveState(next as HabitatState);
+      },
+    };
+    const app = createApp(stateService as never, registrationStorage);
 
     await withKeplerRegistrationResponse(async () => {
       const response = await app.request("/commands/register", {

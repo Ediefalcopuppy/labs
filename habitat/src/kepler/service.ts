@@ -1,9 +1,14 @@
 import { fetchKeplerJson, postKeplerJson } from "./client";
+import type { RegistrationStream } from "../clock/types";
 import type {
   RegistrationContracts,
   StarterHuman,
   StarterModuleRegistration,
 } from "../state/types";
+import {
+  isTrustedKeplerStreamUrl,
+  streamUrlContainsSecret,
+} from "./stream-url";
 
 export type KeplerHabitat = {
   id: string;
@@ -29,9 +34,13 @@ type KeplerHabitatDetailsResponse = {
 
 export type KeplerHabitatRegistration = {
   habitatId: string;
+  streamUrl: string;
+  apiToken: string;
+  stream: RegistrationStream;
   starterModules: StarterModuleRegistration[];
   starterHumans: StarterHuman[];
   contracts: RegistrationContracts;
+  blueprints: KeplerBlueprintCatalogEntry[];
 };
 
 export type KeplerBlueprintCatalogEntry = {
@@ -139,19 +148,81 @@ function normalizeRegistrationContracts(value: unknown): RegistrationContracts |
   return { alerts: { schemaVersion: alerts.schemaVersion, schema: alerts.schema } };
 }
 
+function normalizeRegistrationStream(value: unknown): RegistrationStream | undefined {
+  if (!isRecord(value)) return undefined;
+  if (
+    typeof value.protocolVersion !== "string" || value.protocolVersion.length === 0 ||
+    !Array.isArray(value.subscriptions) ||
+    !value.subscriptions.every(
+      (subscription) => typeof subscription === "string" && subscription.length > 0,
+    ) ||
+    typeof value.currentTick !== "number" ||
+    !Number.isSafeInteger(value.currentTick) ||
+    value.currentTick < 0 ||
+    typeof value.tickIntervalMs !== "number" ||
+    !Number.isFinite(value.tickIntervalMs) ||
+    value.tickIntervalMs <= 0 ||
+    typeof value.ticksPerPulse !== "number" ||
+    !Number.isSafeInteger(value.ticksPerPulse) ||
+    value.ticksPerPulse <= 0 ||
+    (value.status !== "paused" && value.status !== "running")
+  ) {
+    return undefined;
+  }
+
+  return {
+    protocolVersion: value.protocolVersion,
+    subscriptions: [...value.subscriptions],
+    currentTick: value.currentTick,
+    tickIntervalMs: value.tickIntervalMs,
+    ticksPerPulse: value.ticksPerPulse,
+    status: value.status,
+  };
+}
+
 function normalizeKeplerHabitatRegistrationResponse(value: unknown): KeplerHabitatRegistration {
   if (!isRecord(value) || typeof value.habitatId !== "string" || value.habitatId.length === 0) {
     throw new Error("Kepler registration response did not include a habitatId.");
   }
 
+  if (
+    typeof value.streamUrl !== "string" || value.streamUrl.length === 0 ||
+    typeof value.apiToken !== "string" || value.apiToken.length === 0
+  ) {
+    throw new Error("Kepler registration response did not include a stream URL and Habitat API token.");
+  }
+  if (
+    !isTrustedKeplerStreamUrl(value.streamUrl) ||
+    streamUrlContainsSecret(value.streamUrl, value.apiToken)
+  ) {
+    throw new Error("Kepler registration response included an unsafe live clock stream URL.");
+  }
+
+  const stream = normalizeRegistrationStream(value.stream);
   const starterModules = normalizeStarterModules(value.starterModules);
   const starterHumans = normalizeStarterHumans(value.starterHumans);
   const contracts = normalizeRegistrationContracts(value.contracts);
-  if (!starterModules || !starterHumans || !contracts) {
-    throw new Error("Kepler registration response did not include valid starter modules, humans, and alert contracts.");
+  const blueprints = Array.isArray(value.blueprints)
+    ? normalizeKeplerCatalog(
+        value.blueprints as Array<Partial<KeplerBlueprintCatalogEntry> & { id?: string }>,
+      )
+    : undefined;
+  if (!stream || !starterModules || !starterHumans || !contracts || !blueprints) {
+    throw new Error(
+      "Kepler registration response did not include valid stream metadata, starter state, alert contracts, and blueprints.",
+    );
   }
 
-  return { habitatId: value.habitatId, starterModules, starterHumans, contracts };
+  return {
+    habitatId: value.habitatId,
+    streamUrl: value.streamUrl,
+    apiToken: value.apiToken,
+    stream,
+    starterModules,
+    starterHumans,
+    contracts,
+    blueprints,
+  };
 }
 
 function normalizeKeplerHabitat(value: Partial<KeplerHabitat>): KeplerHabitat {
@@ -328,6 +399,12 @@ export function normalizeKeplerHabitatRegistration(
   habitat: Partial<KeplerHabitat>,
 ): KeplerHabitat {
   return normalizeKeplerHabitat(habitat);
+}
+
+export function recoverHabitatUuid(habitatId: string): string | undefined {
+  const match = /^habitat_([0-9a-f]{8})_([0-9a-f]{4})_([0-9a-f]{4})_([0-9a-f]{4})_([0-9a-f]{12})$/i
+    .exec(habitatId);
+  return match ? match.slice(1).join("-").toLowerCase() : undefined;
 }
 
 export async function registerKeplerHabitat(input: {

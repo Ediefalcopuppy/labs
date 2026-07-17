@@ -6,6 +6,6 @@ export async function readStateFromStorage(path: string): Promise<HabitatState |
   return state as HabitatState | undefined;
 }
 
-export async function writeStateToStorage(path: string, state: HabitatState): Promise<void> {
-  await writeRawSqliteState(path, state);
+export async function writeStateToStorage(path: string, state: HabitatState): Promise<number> {
+  return writeRawSqliteState(path, state);
 }

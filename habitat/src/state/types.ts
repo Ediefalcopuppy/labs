@@ -100,6 +100,9 @@ export type HabitatRegistration = {
   registeredAt: string;
   lastSyncedAt: string;
   habitatId?: string;
+  habitatUuid?: string;
+  streamUrl?: string;
+  stream?: RegistrationStream;
   habitatSlug?: string;
   catalogVersion?: string;
   remoteStatus?: string;
@@ -128,3 +131,4 @@ export type HabitatState = {
 
 export type PartialHabitatState = Partial<HabitatState>;
 import type { KeplerBlueprintCatalogEntry } from "../kepler/service";
+import type { RegistrationStream } from "../clock/types";

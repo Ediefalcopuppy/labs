@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { Hono, type Context } from "hono";
 import { createAuthService, type User, type UserRole } from "../auth";
 import { batteryConstructionDrainPerTick, BATTERY_MAX_CHARGE } from "../construction";
@@ -7,17 +7,72 @@ import { runConstructCommand, runDebugConstructCommand, runInventorySetCommand, 
 import { spendInventoryMaterials } from "../domain/inventory";
 import { listHumans } from "../domain/humans";
 import { normalizeModuleNames } from "../domain/modules";
-import { readJsonFile, writeSqliteState } from "../storage";
-import { collectKeplerWorldResource, fetchKeplerBlueprintCatalog, fetchKeplerHabitatRegistration, fetchKeplerHabitatRegistrationDetails, fetchKeplerResourceCatalog, fetchKeplerSolarIrradiance, fetchKeplerWorldScan, fetchKeplerWorldSector, registerKeplerHabitat } from "../kepler/service";
+import {
+  attachHabitatStateRevision,
+  formatHabitatStateEtag,
+  getHabitatStateRevision,
+  HabitatStateConflictError,
+  parseHabitatStateEtag,
+  readJsonFile,
+  writeSqliteState,
+} from "../storage";
+import { collectKeplerWorldResource, fetchKeplerBlueprintCatalog, fetchKeplerHabitatRegistration, fetchKeplerHabitatRegistrationDetails, fetchKeplerResourceCatalog, fetchKeplerSolarIrradiance, fetchKeplerWorldScan, fetchKeplerWorldSector } from "../kepler/service";
 import { registerHealthRoute } from "./health";
 import { createStateService, type StateService, normalizeState } from "../state/service";
-import type { StarterHuman, StarterModuleRegistration } from "../state/types";
+import { ClockEventHub } from "../clock/events";
+import {
+  createClockService,
+  ManualTickUnavailableError,
+  type ClockService,
+} from "../clock/service";
+import {
+  ClockStateReplacementUnavailableError,
+  createClockStorage,
+} from "../clock/storage";
+import {
+  materializeRegistrationState,
+  persistKeplerRegistration,
+  serializeRegistrationLifecycle,
+  type RegistrationStorage,
+} from "../registration/service";
 
 const defaultStateService = createStateService({ storagePath: ".habitat/habitat.sqlite" });
 const defaultAuthService = createAuthService(".habitat/habitat.sqlite");
 
 class HttpError extends Error {
-  constructor(public status: 401 | 403, message: string) { super(message); }
+  constructor(public status: 400 | 401 | 403 | 409 | 412 | 428, message: string) { super(message); }
+}
+
+function httpErrorName(status: HttpError["status"]): string {
+  switch (status) {
+    case 400: return "Invalid request";
+    case 401: return "Authentication required";
+    case 403: return "Admin access required";
+    case 409: return "Clock conflict";
+    case 412: return "State precondition failed";
+    case 428: return "State precondition required";
+  }
+}
+
+function requireStateIfMatch(c: Context): number | null {
+  const header = c.req.header("if-match");
+  if (!header) {
+    throw new HttpError(428, "Load the latest habitat state before replacing it.");
+  }
+  const revision = parseHabitatStateEtag(header);
+  if (revision === undefined) {
+    throw new HttpError(400, "If-Match must contain the ETag returned by GET /state.");
+  }
+  return revision;
+}
+
+function setStateEtag(c: Context, state: unknown): void {
+  const revision = getHabitatStateRevision(state);
+  if (revision === undefined) {
+    throw new Error("Habitat state response is missing its storage revision.");
+  }
+  c.header("etag", formatHabitatStateEtag(revision));
+  c.header("cache-control", "no-store");
 }
 
 function requireItem<T>(items: T[], predicate: (item: T) => boolean, message: string): T {
@@ -76,47 +131,39 @@ function resolveEvaAlert(data: Awaited<ReturnType<StateService["getState"]>>, co
   for (const alert of data.alerts) if (alert.code === code && alert.status === "open") Object.assign(alert, { status: "resolved", resolvedAt: now, lastObservedAt: now });
 }
 
-function materializeRegistrationState(
-  data: Awaited<ReturnType<StateService["getState"]>>,
-  starterModules: StarterModuleRegistration[] | undefined,
-  starterHumans: StarterHuman[] | undefined,
-  contacts: unknown,
-): void {
-  if (starterModules) {
-    data.modules = starterModules.map((module) => ({
-      ...module,
-      name: module.id,
-      connectedTo: [...module.connectedTo],
-      runtimeAttributes: { ...module.runtimeAttributes },
-      capabilities: [...module.capabilities],
-    }));
-  }
-
-  if (starterHumans) {
-    data.humans = starterHumans.map((human) => ({
-      id: human.id,
-      name: human.displayName,
-      moduleId: human.locationModuleId,
-    }));
-  }
-
-  const contactAlerts = contacts && typeof contacts === "object"
-    ? (contacts as Record<string, unknown>).alerts
-    : undefined;
-  if (Array.isArray(contactAlerts)) {
-    data.alerts = contactAlerts
-      .filter((alert): alert is Record<string, unknown> => Boolean(alert && typeof alert === "object"))
-      .filter((alert) => typeof alert.id === "string" && alert.id.length > 0)
-      .map((alert) => ({ ...alert, id: alert.id as string, status: typeof alert.status === "string" ? alert.status : "open" })) as typeof data.alerts;
-  }
-}
-
-export function createApp(stateService: StateService = defaultStateService): Hono {
+export function createApp(
+  stateService: StateService = defaultStateService,
+  registrationStorage?: RegistrationStorage,
+  clockService?: ClockService,
+  clockEvents?: ClockEventHub,
+): Hono {
   const app = new Hono();
   const authService = defaultAuthService;
+  const stateStoragePath = (stateService as { storagePath?: unknown }).storagePath;
+  const stateClockStorage =
+    typeof stateStoragePath === "string" && stateStoragePath.length > 0
+      ? createClockStorage(stateStoragePath)
+      : undefined;
+  const resolvedRegistrationStorage = registrationStorage ?? stateClockStorage;
+  const resolvedClockEvents = clockEvents ?? new ClockEventHub();
+  const resolvedClockService = clockService ?? (
+    stateClockStorage
+      ? createClockService({
+          storage: stateClockStorage,
+          getRegistration: async () => (await stateService.getState()).registration,
+          onPublicEvent: (event) => resolvedClockEvents.publish(event),
+        })
+      : undefined
+  );
   registerHealthRoute(app);
   app.onError((error, c) => {
-    if (error instanceof HttpError) return c.json({ error: error.status === 401 ? "Authentication required" : "Admin access required", message: error.message }, error.status);
+    if (error instanceof HttpError) return c.json({ error: httpErrorName(error.status), message: error.message }, error.status);
+    if (error instanceof ClockStateReplacementUnavailableError) {
+      return c.json({ error: "Clock conflict", message: error.message }, 409);
+    }
+    if (error instanceof HabitatStateConflictError) {
+      return c.json({ error: "Clock conflict", message: error.message }, 409);
+    }
     console.error(`[error] ${c.req.method} ${new URL(c.req.url).pathname}: ${error.message}`);
     return c.json({ error: "Habitat request failed", message: error.message }, 500);
   });
@@ -133,6 +180,14 @@ export function createApp(stateService: StateService = defaultStateService): Hon
     if (!user) throw new HttpError(401, "Sign in to continue.");
     if (user.role !== "admin") throw new HttpError(403, "This action is only available to admins.");
     return user;
+  };
+  const requireManualClockForStateReplacement = async (): Promise<void> => {
+    if (resolvedClockService && !(await resolvedClockService.getStatus()).manualTicksAllowed) {
+      throw new HttpError(
+        409,
+        "Turn Kepler clock listening off before replacing or resetting the complete habitat state.",
+      );
+    }
   };
 
   app.post("/auth/signup", async (c) => {
@@ -153,16 +208,55 @@ export function createApp(stateService: StateService = defaultStateService): Hon
   app.get("/admin/users", async (c) => { requireAdmin(c); return c.json(await authService.listUsers()); });
   app.post("/admin/users/:username/role", async (c) => { requireAdmin(c); const body = await c.req.json() as { role?: UserRole }; return c.json(await authService.setRole(c.req.param("username"), body.role ?? "user")); });
 
-  app.get("/state", async (c) => c.json(await stateService.getState()));
+  app.get("/state", async (c) => {
+    const state = await stateService.getState();
+    setStateEtag(c, state);
+    return c.json(state);
+  });
   app.get("/humans", async (c) => c.json(await listHumans(stateService)));
   app.post("/state", async (c) => {
     console.log("[action] save habitat state");
-    return c.json(await stateService.saveState(await c.req.json()));
+    const expectedRevision = requireStateIfMatch(c);
+    const replacement = normalizeState(await c.req.json());
+    attachHabitatStateRevision(replacement, expectedRevision);
+    let saved;
+    try {
+      if (stateClockStorage) {
+        saved = await stateClockStorage.replaceState(replacement);
+      } else {
+        await requireManualClockForStateReplacement();
+        const current = await stateService.getState();
+        if (current.registration) {
+          replacement.registration = structuredClone(current.registration);
+        } else {
+          delete replacement.registration;
+        }
+        saved = await stateService.saveState(replacement);
+      }
+    } catch (error) {
+      if (error instanceof HabitatStateConflictError) {
+        throw new HttpError(412, error.message);
+      }
+      throw error;
+    }
+    setStateEtag(c, saved);
+    return c.json(saved);
   });
   app.delete("/state", async (c) => {
     console.log("[action] reset habitat state");
-    return c.json(await stateService.resetState());
+    const reset = stateClockStorage
+      ? await stateClockStorage.resetState()
+      : (await requireManualClockForStateReplacement(), await stateService.resetState());
+    setStateEtag(c, reset);
+    return c.json(reset);
   });
+
+  if (resolvedClockService) {
+    app.get("/clock/status", async (c) => c.json(await resolvedClockService.getStatus()));
+    app.post("/clock/listen/on", async (c) => c.json(await resolvedClockService.listenOn()));
+    app.post("/clock/listen/off", async (c) => c.json(await resolvedClockService.listenOff()));
+    app.get("/clock/events", (c) => resolvedClockEvents.createResponse(c.req.raw.signal));
+  }
 
   app.get("/kepler/blueprints", async (c) => c.json(await fetchKeplerBlueprintCatalog()));
   app.get("/kepler/resources", async (c) => c.json(await fetchKeplerResourceCatalog()));
@@ -185,29 +279,23 @@ export function createApp(stateService: StateService = defaultStateService): Hon
 
   app.post("/commands/register", async (c) => {
     console.log("[action] register habitat");
+    if (!resolvedRegistrationStorage) {
+      throw new Error(
+        "Explicit registration storage is required when the state service has no storage path.",
+      );
+    }
     const { name } = (await c.req.json()) as { name: string };
-    const data = await stateService.getState();
-    if (data.registration) throw new Error(`This directory is already registered as '${data.registration.displayName}'.`);
-    const keplerRegistration = await registerKeplerHabitat({ displayName: name, habitatUuid: randomUUID() });
-    const now = new Date().toISOString();
-    data.registration = {
-      displayName: name,
-      registeredAt: now,
-      lastSyncedAt: now,
-      habitatId: keplerRegistration.habitatId,
-      starterModules: keplerRegistration.starterModules,
-      starterHumans: keplerRegistration.starterHumans,
-      contracts: keplerRegistration.contracts,
-    };
-    materializeRegistrationState(
-      data,
-      keplerRegistration.starterModules,
-      keplerRegistration.starterHumans,
-      undefined,
-    );
-    return c.json(await stateService.saveState(data));
+    return c.json(await persistKeplerRegistration(
+      stateService,
+      resolvedRegistrationStorage,
+      name,
+    ));
   });
   app.post("/commands/link", async (c) => {
+    if (!resolvedRegistrationStorage) {
+      throw new Error("Explicit registration storage is required when the state service has no storage path.");
+    }
+    return serializeRegistrationLifecycle(resolvedRegistrationStorage, async () => {
     console.log("[action] link habitat");
     const { id } = (await c.req.json()) as { id: string };
     const data = await stateService.getState();
@@ -217,13 +305,19 @@ export function createApp(stateService: StateService = defaultStateService): Hon
     data.registration = { displayName: habitat.displayName, registeredAt: now, lastSyncedAt: now, habitatId: habitat.id, habitatSlug: habitat.habitatSlug, catalogVersion: habitat.catalogVersion, remoteStatus: habitat.status, lastSeenAt: habitat.lastSeenAt ?? null, starterHumans: habitat.starterHumans, starterModules: habitat.starterModules, contracts: habitat.contracts, contacts: habitat.contacts };
     materializeRegistrationState(data, habitat.starterModules, habitat.starterHumans, habitat.contacts);
     return c.json(await stateService.saveState(data));
+    });
   });
   app.delete("/commands/unregister", async (c) => {
     console.log("[action] unregister habitat");
     const data = await stateService.getState();
     const displayName = data.registration?.displayName;
-    delete data.registration;
-    await stateService.saveState(data);
+    if (!resolvedRegistrationStorage) {
+      throw new Error(
+        "Explicit registration storage is required when the state service has no storage path.",
+      );
+    }
+    if (resolvedClockService) await resolvedClockService.listenOff();
+    await serializeRegistrationLifecycle(resolvedRegistrationStorage, () => resolvedRegistrationStorage.deleteRegistration());
     return c.json({ displayName });
   });
   app.get("/commands/status", async (c) => c.json(await stateService.getState()));
@@ -486,9 +580,31 @@ export function createApp(stateService: StateService = defaultStateService): Hon
     return c.json(await runModuleSetStatusCommand({ stateService, ...(await c.req.json()) as { moduleId: string; status: string } }));
   });
   app.post("/commands/tick", async (c) => {
-    const { count } = (await c.req.json()) as { count: number };
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      throw new HttpError(400, "Tick request body must be valid JSON.");
+    }
+    if (!body || typeof body !== "object" || Array.isArray(body)) {
+      throw new HttpError(400, "Tick request body must be a JSON object.");
+    }
+    const count = (body as { count?: unknown }).count;
+    if (typeof count !== "number" || !Number.isSafeInteger(count) || count <= 0 || count > 100_000) {
+      throw new HttpError(400, "Tick count must be a positive whole number no greater than 100000.");
+    }
     console.log(`[action] tick ${count}`);
-    return c.json(await runTickCommand({ stateService, count } as any));
+    if (!resolvedClockService) {
+      return c.json(await runTickCommand({ stateService, count } as any));
+    }
+    try {
+      return c.json(await resolvedClockService.manualTick(count));
+    } catch (error) {
+      if (error instanceof ManualTickUnavailableError) {
+        throw new HttpError(409, error.message);
+      }
+      throw error;
+    }
   });
 
   app.post("/commands/zone/create", async (c) => {
@@ -645,9 +761,16 @@ export function createApp(stateService: StateService = defaultStateService): Hon
   });
   app.post("/commands/storage/restore", async (c) => {
     requireAdmin(c);
-    const backupPath = join(process.cwd(), ".habitat", "data.json.backup");
+    const backupPath = typeof stateStoragePath === "string"
+      ? join(dirname(stateStoragePath), "data.json.backup")
+      : join(process.cwd(), ".habitat", "data.json.backup");
     const backup = await readJsonFile(backupPath);
-    return c.json(await stateService.saveState(normalizeState(backup)));
+    const restored = normalizeState(backup);
+    const saved = stateClockStorage
+      ? await stateClockStorage.restoreState(restored)
+      : (await requireManualClockForStateReplacement(), await stateService.saveState(restored));
+    setStateEtag(c, saved);
+    return c.json(saved);
   });
 
   // Serve the Vite production bundle when it exists. API routes above remain the source of truth.

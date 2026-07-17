@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import { buildCommandRequest, getCommandById } from "../web/src/commands";
 import { routeFromHash, viewToHash } from "../web/src/routes";
-import { constructionProgress, isDoomEasterEgg, materialEntries, notificationSummary, resourceScanPayload } from "../web/src/ui-format";
+import { commandPayload, constructionProgress, isDoomEasterEgg, materialEntries, notificationSummary, resourceScanPayload } from "../web/src/ui-format";
 
 describe("web routes", () => {
   test("round-trips a view through the hash route", () => {
@@ -19,6 +19,19 @@ describe("web routes", () => {
 });
 
 describe("command requests", () => {
+  test("keeps clock controls on the local HTTP API", async () => {
+    const source = await Bun.file(new URL("../web/src/react-app.tsx", import.meta.url)).text();
+
+    expect(source).toContain('"/clock/status"');
+    expect(source).toContain('"/clock/listen/on"');
+    expect(source).toContain('"/clock/listen/off"');
+    expect(source).toContain('"GET", "/clock/status"');
+    expect(source).toContain('"POST", "/clock/listen/on"');
+    expect(source).toContain('"POST", "/clock/listen/off"');
+    expect(source).not.toContain("new WebSocket");
+    expect(source).not.toContain("includeStreamToken");
+  });
+
   test("encodes path params without leaving them in the request body", () => {
     const command = getCommandById("module-show");
     const request = buildCommandRequest(command, { name: "greenhouse-1" });
@@ -42,6 +55,17 @@ describe("command requests", () => {
       y: 4,
       sensorStrength: 70,
       radiusTiles: 2,
+    });
+  });
+
+  test("coerces command-drawer tick and inventory values before JSON serialization", () => {
+    expect(commandPayload({ count: "10", label: "night shift" })).toEqual({
+      count: 10,
+      label: "night shift",
+    });
+    expect(commandPayload({ resourceId: "water", amount: "25" })).toEqual({
+      resourceId: "water",
+      amount: 25,
     });
   });
 });

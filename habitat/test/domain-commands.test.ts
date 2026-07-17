@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { runConstructCommand, runTickCommand } from "../src/domain/commands";
 import { canSpendInventory } from "../src/domain/inventory";
+import { advanceSimulation } from "../src/domain/simulation";
 
 function createStateService(state: unknown) {
   let currentState = structuredClone(state);
@@ -27,6 +28,94 @@ describe("inventory rules", () => {
 });
 
 describe("backend commands", () => {
+  for (const count of [1, 10, 100]) {
+    test(`shared simulation advancement matches the tick command for ${count} tick(s)`, async () => {
+      const initialState = {
+        modules: [
+          {
+            id: "consumer-1",
+            name: "consumer-1",
+            blueprintId: "workbench",
+            displayName: "Workbench",
+            connectedTo: [],
+            runtimeAttributes: { state: "online", powerDraw: 3 },
+            capabilities: [],
+          },
+          {
+            id: "battery-1",
+            name: "battery-1",
+            blueprintId: "battery-bank",
+            displayName: "Battery Bank",
+            connectedTo: [],
+            runtimeAttributes: {
+              state: "online",
+              isBattery: true,
+              charge: 100,
+              energyStorageKwh: 500,
+            },
+            capabilities: ["isBattery"],
+          },
+          {
+            id: "solar-1",
+            name: "solar-1",
+            blueprintId: "small-solar-array",
+            displayName: "Small Solar Array",
+            connectedTo: [],
+            runtimeAttributes: { state: "online", isCharger: true, powerGenerationKw: 9 },
+            capabilities: ["isCharger"],
+          },
+          {
+            id: "facility-1",
+            name: "facility-1",
+            blueprintId: "workshop-fabricator",
+            displayName: "Workshop Fabricator",
+            connectedTo: [],
+            runtimeAttributes: { state: "online", moduleType: "workshop-fabricator" },
+            capabilities: [],
+          },
+          {
+            id: "supply-1",
+            name: "supply-1",
+            blueprintId: "supply-cache",
+            displayName: "Supply Cache",
+            connectedTo: [],
+            runtimeAttributes: { state: "online" },
+            capabilities: ["logistics"],
+          },
+        ],
+        inventory: {},
+        constructionJobs: [
+          {
+            id: "construction-1",
+            moduleName: "greenhouse-1",
+            blueprintId: "greenhouse",
+            facilityModuleId: "facility-1",
+            facilityModuleName: "Workshop Fabricator",
+            totalBuildTicks: 100,
+            remainingBuildTicks: 100,
+            consumedMaterials: {},
+            runtimeAttributes: {},
+            capabilities: [],
+          },
+        ],
+        power: { powerConsumedTicks: 0 },
+        blueprints: [],
+      };
+      const stateService = createStateService(initialState);
+      const directState = structuredClone(initialState);
+
+      const commandResult = await runTickCommand({
+        stateService: stateService as never,
+        count,
+        getIrradiance: async () => 900,
+      });
+      const directResult = advanceSimulation(directState as never, count, 900);
+
+      expect(commandResult).toEqual(directResult);
+      expect(await stateService.getState()).toEqual(directResult.data);
+    });
+  }
+
   test("tick restores module power, battery charging, solar charging, and construction advancement", async () => {
     const stateService = createStateService({
       modules: [

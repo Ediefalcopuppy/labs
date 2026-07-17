@@ -12,6 +12,7 @@ export default defineConfig(({ mode }) => {
       "/state": backendUrl,
       "/commands": backendUrl,
       "/kepler": backendUrl,
+      "/clock": backendUrl,
       "/health": backendUrl,
       "/auth": backendUrl,
       "/admin": backendUrl,

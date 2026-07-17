@@ -1,4 +1,9 @@
 import { readStateFromStorage, writeStateToStorage } from "./storage";
+import {
+  attachHabitatStateRevision,
+  getHabitatStateRevision,
+} from "../storage";
+import type { RegistrationStream } from "../clock/types";
 import type {
   Airlock,
   ConstructionJob,
@@ -54,6 +59,39 @@ function normalizeInventory(inventory: unknown): HabitatInventory {
   );
 }
 
+function normalizeRegistrationStream(stream: unknown): RegistrationStream | undefined {
+  if (!stream || typeof stream !== "object") return undefined;
+  const candidate = stream as Partial<RegistrationStream>;
+  if (
+    typeof candidate.protocolVersion !== "string" || candidate.protocolVersion.length === 0 ||
+    !Array.isArray(candidate.subscriptions) ||
+    !candidate.subscriptions.every(
+      (subscription) => typeof subscription === "string" && subscription.length > 0,
+    ) ||
+    typeof candidate.currentTick !== "number" ||
+    !Number.isInteger(candidate.currentTick) ||
+    candidate.currentTick < 0 ||
+    typeof candidate.tickIntervalMs !== "number" ||
+    !Number.isFinite(candidate.tickIntervalMs) ||
+    candidate.tickIntervalMs <= 0 ||
+    typeof candidate.ticksPerPulse !== "number" ||
+    !Number.isInteger(candidate.ticksPerPulse) ||
+    candidate.ticksPerPulse <= 0 ||
+    (candidate.status !== "paused" && candidate.status !== "running")
+  ) {
+    return undefined;
+  }
+
+  return {
+    protocolVersion: candidate.protocolVersion,
+    subscriptions: [...candidate.subscriptions],
+    currentTick: candidate.currentTick,
+    tickIntervalMs: candidate.tickIntervalMs,
+    ticksPerPulse: candidate.ticksPerPulse,
+    status: candidate.status,
+  };
+}
+
 function normalizeRegistration(registration: unknown): HabitatRegistration | undefined {
   if (!registration || typeof registration !== "object") {
     return undefined;
@@ -79,6 +117,15 @@ function normalizeRegistration(registration: unknown): HabitatRegistration | und
       typeof candidate.habitatId === "string" && candidate.habitatId.length > 0
         ? candidate.habitatId
         : undefined,
+    habitatUuid:
+      typeof candidate.habitatUuid === "string" && candidate.habitatUuid.length > 0
+        ? candidate.habitatUuid
+        : undefined,
+    streamUrl:
+      typeof candidate.streamUrl === "string" && candidate.streamUrl.length > 0
+        ? candidate.streamUrl
+        : undefined,
+    stream: normalizeRegistrationStream(candidate.stream),
     habitatSlug:
       typeof candidate.habitatSlug === "string" && candidate.habitatSlug.length > 0
         ? candidate.habitatSlug
@@ -172,21 +219,36 @@ export function normalizeState(state: unknown): HabitatState {
 
 export function createStateService(options: StateServiceOptions) {
   return {
+    storagePath: options.storagePath,
+
     async getState(): Promise<HabitatState> {
       const stored = await readStateFromStorage(options.storagePath);
-      return normalizeState(stored ?? createEmptyState());
+      const normalized = normalizeState(stored ?? createEmptyState());
+      return attachHabitatStateRevision(
+        normalized,
+        stored === undefined ? null : (getHabitatStateRevision(stored) ?? null),
+      );
     },
 
     async saveState(state: HabitatState): Promise<HabitatState> {
+      const expectedRevision = getHabitatStateRevision(state);
       const normalized = normalizeState(state);
-      await writeStateToStorage(options.storagePath, normalized);
-      return normalized;
+      if (expectedRevision !== undefined) {
+        attachHabitatStateRevision(normalized, expectedRevision);
+      }
+      const revision = await writeStateToStorage(options.storagePath, normalized);
+      return attachHabitatStateRevision(normalized, revision);
     },
 
     async resetState(): Promise<HabitatState> {
+      const stored = await readStateFromStorage(options.storagePath);
       const emptyState = createEmptyState();
-      await writeStateToStorage(options.storagePath, emptyState);
-      return emptyState;
+      attachHabitatStateRevision(
+        emptyState,
+        stored === undefined ? null : (getHabitatStateRevision(stored) ?? null),
+      );
+      const revision = await writeStateToStorage(options.storagePath, emptyState);
+      return attachHabitatStateRevision(emptyState, revision);
     },
   };
 }

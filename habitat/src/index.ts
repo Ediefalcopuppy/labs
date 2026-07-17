@@ -4,7 +4,7 @@ import { Command, InvalidArgumentError } from "commander";
 import { randomUUID } from "node:crypto";
 import { copyFile, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { deleteBackendCommand, getBackendCommand, getBackendState, postBackendCommand, saveBackendState } from "./client";
+import { deleteBackendCommand, getBackendCommand, getBackendState, getLocalOperatorCommand, postBackendCommand, saveBackendState } from "./client";
 import { normalizeState } from "./state/service";
 import { readJsonFile, readSqliteState, writeSqliteState } from "./storage";
 import type {
@@ -39,6 +39,14 @@ import {
   solarGeneratedChargePerTick,
 } from "./construction";
 import { canSpendInventory as canSpendInventoryDomain, spendInventoryMaterials as spendInventoryMaterialsDomain } from "./domain/inventory";
+import {
+  formatClockStatus,
+  formatHabitatStatus,
+  watchClockEventsOnSigint,
+  type HabitatStatusPayload,
+} from "./clock/cli";
+import type { ClockStatus } from "./clock/types";
+import { createClockStorage } from "./clock/storage";
 
 type HabitatModule = StarterModuleInstance;
 
@@ -53,7 +61,7 @@ type HabitatData = HabitatState;
 const dataDir = join(process.cwd(), ".habitat");
 const dataPath = join(dataDir, "data.json");
 const dataBackupPath = join(dataDir, "data.json.backup");
-const sqlitePath = join(dataDir, "habitat.sqlite");
+const sqlitePath = process.env.HABITAT_SQLITE_PATH ?? join(dataDir, "habitat.sqlite");
 
 async function readData(): Promise<HabitatData> {
   return getBackendState<HabitatData>();
@@ -894,10 +902,16 @@ function formatObjectLines(value: unknown, indent = 0): string[] {
 
 const program = new Command();
 
+function jsonOutputRequested(localOption?: boolean): boolean {
+  return Boolean(localOption || program.opts().json);
+}
+
 program
   .name("habitat")
   .description("A small command-line app for habitat.")
   .version("0.1.0")
+  .option("--json", "print one JSON document")
+  .option("--jsonl", "print one JSON object per streamed event")
   .showHelpAfterError("Try 'habitat --help' to see what habitat can do.")
   .addHelpText(
     "after",
@@ -1013,8 +1027,8 @@ migrateCommand
   .description("Restore data.json.backup and replace the SQLite state with it.")
   .action(async () => {
     const state = normalizeState(await readJsonFile(dataBackupPath));
-    await writeFile(dataPath, `${JSON.stringify(state, null, 2)}\n`);
-    await writeSqliteState(sqlitePath, state);
+    const restored = await createClockStorage(sqlitePath).restoreState(state);
+    await writeFile(dataPath, `${JSON.stringify(restored, null, 2)}\n`);
 
     console.log(`Restored legacy local JSON data to ${dataPath}.`);
     console.log(`Rebuilt SQLite state at ${sqlitePath}.`);
@@ -1033,15 +1047,20 @@ program
   .description("Register this habitat through the backend.")
   .requiredOption("-n, --name <habitatName>", "habitat display name")
   .action(async (options: { name: string }) => {
-    const data = await readData();
+    const localStatus = await getLocalOperatorCommand<HabitatStatusPayload>("/operator/status");
 
-    if (data.registration) {
-      program.error(`This directory is already registered as '${data.registration.displayName}'.`);
+    if (
+      localStatus.registration?.streamUrl &&
+      localStatus.registration.stream &&
+      localStatus.registration.apiToken
+    ) {
+      program.error(`This directory is already registered as '${localStatus.registration.displayName}'.`);
     }
 
-    await postBackendCommand<HabitatState>("/commands/register", { name: options.name });
-
-    console.log(`Registered habitat '${options.name}'.`);
+    const result = await postBackendCommand<HabitatState>("/commands/register", {
+      name: options.name,
+    });
+    console.log(`Registered habitat '${result.registration?.displayName ?? options.name}'.`);
   });
 
 program
@@ -1085,11 +1104,10 @@ program
       return;
     }
 
-    const displayName = data.registration.displayName;
-    delete data.registration;
-    await writeData(data);
-
-    console.log(`Unregistered habitat '${displayName}'.`);
+    const result = await deleteBackendCommand<{ displayName?: string }>(
+      "/commands/unregister",
+    );
+    console.log(`Unregistered habitat '${result.displayName ?? data.registration.displayName}'.`);
   });
 
 const registrationCommand = program
@@ -1106,7 +1124,7 @@ registrationCommand
       kepler?: unknown;
     }>("/commands/registration/details");
 
-    if (options.json) {
+    if (jsonOutputRequested(options.json)) {
       console.log(JSON.stringify(payload, null, 2));
       return;
     }
@@ -1116,7 +1134,7 @@ registrationCommand
     }
   });
 
-program
+const habitatStatusCommand = program
   .command("status")
   .description("Show the habitat status.")
   .addHelpText(
@@ -1129,68 +1147,59 @@ Examples:
 `,
   )
   .action(async () => {
-    const data = await readData();
-    const moduleStates = data.modules.reduce<Record<ModuleState | "unknown", number>>(
-      (counts, module) => {
-        const state = moduleCurrentState(module);
-        counts[state] = (counts[state] ?? 0) + 1;
-        return counts;
-      },
-      { online: 0, offline: 0, idle: 0, active: 0, damaged: 0, unknown: 0 },
-    );
-    const totalPowerDraw = sumModulePowerDraw(data.modules);
-
-    console.log(`Registered: ${data.registration ? "yes" : "no"}`);
-    if (data.registration) {
-      console.log(`Habitat name: ${data.registration.displayName}`);
-      if (data.registration.habitatId) {
-        console.log(`Habitat id: ${data.registration.habitatId}`);
-      }
-      if (data.registration.habitatSlug) {
-        console.log(`Habitat slug: ${data.registration.habitatSlug}`);
-      }
-      if (data.registration.remoteStatus) {
-        console.log(`Remote status: ${data.registration.remoteStatus}`);
-      }
-      if (data.registration.catalogVersion) {
-        console.log(`Catalog version: ${data.registration.catalogVersion}`);
-      }
-      if (data.registration.lastSeenAt) {
-        console.log(`Last seen at: ${data.registration.lastSeenAt}`);
-      }
-      if (data.registration.starterHumans !== undefined) {
-        console.log("Starter humans:");
-        for (const line of formatObjectLines(data.registration.starterHumans, 2)) {
-          console.log(line);
-        }
-      }
-      if (data.registration.contacts !== undefined) {
-        console.log("Contacts:");
-        for (const line of formatObjectLines(data.registration.contacts, 2)) {
-          console.log(line);
-        }
-      }
-      console.log(`Registered at: ${data.registration.registeredAt}`);
-      console.log(`Last synced at: ${data.registration.lastSyncedAt}`);
+    const data = await getLocalOperatorCommand<HabitatStatusPayload>("/operator/status");
+    if (habitatStatusCommand.optsWithGlobals().json) {
+      console.log(JSON.stringify(data, null, 2));
+      return;
     }
-
-    console.log(`Zones: ${data.zones.length}`);
-    console.log(`Airlocks: ${data.airlocks.length}`);
-    console.log(`Doors: ${data.doors.length}`);
-    console.log(`Modules: ${data.modules.length}`);
-    console.log(`Blueprints: ${data.blueprints.length}`);
-    console.log(`Inventory resources: ${Object.keys(data.inventory).length}`);
-    console.log(`Construction jobs: ${data.constructionJobs.length}`);
-    console.log(`Power consumed ticks: ${data.power.powerConsumedTicks}`);
-
-    if (data.modules.length > 0) {
-      console.log(
-        `Module states: online ${moduleStates.online}, offline ${moduleStates.offline}, idle ${moduleStates.idle}, active ${moduleStates.active}, damaged ${moduleStates.damaged}, unknown ${moduleStates.unknown}`,
-      );
-      console.log(`Total current module power draw: ${totalPowerDraw}`);
-      console.log(`Energy cost for one tick: ${totalPowerDraw}`);
-    }
+    for (const line of formatHabitatStatus(data)) console.log(line);
   });
+
+const clockCommand = new Command("clock")
+  .description("Control the Kepler live clock.")
+  .showHelpAfterError("Try 'habitat clock --help' to see clock commands.");
+
+const clockStatusCommand = clockCommand
+  .command("status")
+  .description("Show the persisted Kepler clock status.")
+  .action(async () => {
+    const status = await getBackendCommand<ClockStatus>("/clock/status");
+    if (clockStatusCommand.optsWithGlobals().json) {
+      console.log(JSON.stringify(status, null, 2));
+      return;
+    }
+    for (const line of formatClockStatus(status)) console.log(line);
+  });
+
+function parseClockListenMode(value: string): "on" | "off" {
+  if (value === "on" || value === "off") return value;
+  throw new InvalidArgumentError("clock listening mode must be 'on' or 'off'.");
+}
+
+const clockListenCommand = clockCommand
+  .command("listen")
+  .description("Turn the Kepler live clock listener on or off.")
+  .argument("<mode>", "listener mode: on or off", parseClockListenMode)
+  .action(async (mode: "on" | "off") => {
+    const status = await postBackendCommand<ClockStatus>(`/clock/listen/${mode}`);
+    if (clockListenCommand.optsWithGlobals().json) {
+      console.log(JSON.stringify(status, null, 2));
+      return;
+    }
+    for (const line of formatClockStatus(status)) console.log(line);
+  });
+
+const clockWatchCommand = clockCommand
+  .command("watch")
+  .description("Watch future token-free clock events from the local backend.")
+  .action(async () => {
+    await watchClockEventsOnSigint({
+      jsonl: Boolean(clockWatchCommand.optsWithGlobals().jsonl),
+      write: (text) => process.stdout.write(text),
+    });
+  });
+
+program.addCommand(clockCommand);
 
 const solarCommand = new Command("solar")
   .description("Inspect live solar conditions from Kepler.")
@@ -2229,7 +2238,7 @@ resourceCommand
       radius: options.radius,
     });
 
-    if (options.json) {
+    if (jsonOutputRequested(options.json)) {
       console.log(JSON.stringify(scan, null, 2));
       return;
     }
@@ -2264,7 +2273,7 @@ const scanCommand = new Command("scan")
       radius: options.radius,
     });
 
-    if (options.json) {
+    if (jsonOutputRequested(options.json)) {
       console.log(JSON.stringify(scan, null, 2));
       return;
     }
@@ -2297,7 +2306,7 @@ humanCommand
   .option("--json", "print the complete JSON response")
   .action(async (options: { json?: boolean }) => {
     const humans = await getBackendCommand<unknown>("/humans");
-    printBackendPayload(humans, options.json);
+    printBackendPayload(humans, jsonOutputRequested(options.json));
   });
 
 humanCommand
@@ -2326,7 +2335,7 @@ evaCommand
   .option("--json", "print the complete JSON response")
   .action(async (options: { json?: boolean }) => {
     const eva = await getBackendCommand<unknown>("/commands/eva/status");
-    printBackendPayload(eva, options.json);
+    printBackendPayload(eva, jsonOutputRequested(options.json));
   });
 
 evaCommand
@@ -2380,7 +2389,7 @@ alertCommand
   .option("--json", "print the complete JSON response")
   .action(async (options: { json?: boolean }) => {
     const alerts = await getBackendCommand<unknown>("/commands/alert/list");
-    printBackendPayload(alerts, options.json);
+    printBackendPayload(alerts, jsonOutputRequested(options.json));
   });
 
 alertCommand
