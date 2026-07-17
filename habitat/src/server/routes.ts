@@ -16,7 +16,7 @@ import {
   readJsonFile,
   writeSqliteState,
 } from "../storage";
-import { collectKeplerWorldResource, fetchKeplerBlueprintCatalog, fetchKeplerHabitatRegistration, fetchKeplerHabitatRegistrationDetails, fetchKeplerResourceCatalog, fetchKeplerSolarIrradiance, fetchKeplerWorldScan, fetchKeplerWorldSector } from "../kepler/service";
+import { collectKeplerWorldResource, fetchKeplerBlueprintCatalog, fetchKeplerHabitatRegistration, fetchKeplerHabitatRegistrationDetails, fetchKeplerResourceCatalog, fetchKeplerSolarIrradiance, fetchKeplerWorldScan, fetchKeplerWorldSector, updateKeplerSolarIrradiance } from "../kepler/service";
 import { registerHealthRoute } from "./health";
 import { createStateService, type StateService, normalizeState } from "../state/service";
 import { ClockEventHub } from "../clock/events";
@@ -261,6 +261,24 @@ export function createApp(
   app.get("/kepler/blueprints", async (c) => c.json(await fetchKeplerBlueprintCatalog()));
   app.get("/kepler/resources", async (c) => c.json(await fetchKeplerResourceCatalog()));
   app.get("/kepler/solar", async (c) => c.json({ irradiance: await fetchKeplerSolarIrradiance() }));
+  app.patch("/commands/solar/irradiance", async (c) => {
+    console.log("[action] update solar irradiance");
+    const body = await c.req.json() as Record<string, unknown>;
+    for (const field of ["mode", "condition", "updatedBy"] as const) {
+      if (typeof body[field] !== "string" || body[field].length === 0) throw new Error(`${field} must be a non-empty string.`);
+    }
+    const manualIrradianceWPerM2 = parseFiniteNumber(body.manualIrradianceWPerM2, "manualIrradianceWPerM2");
+    const effectiveIrradianceWPerM2 = parseFiniteNumber(body.effectiveIrradianceWPerM2, "effectiveIrradianceWPerM2");
+    if (manualIrradianceWPerM2 < 0 || manualIrradianceWPerM2 > 900) throw new Error("manualIrradianceWPerM2 must be between 0 and 900.");
+    if (effectiveIrradianceWPerM2 < 0 || effectiveIrradianceWPerM2 > 900) throw new Error("effectiveIrradianceWPerM2 must be between 0 and 900.");
+    return c.json(await updateKeplerSolarIrradiance({
+      mode: body.mode as string,
+      manualIrradianceWPerM2,
+      effectiveIrradianceWPerM2,
+      condition: body.condition as string,
+      updatedBy: body.updatedBy as string,
+    }));
+  });
   app.get("/kepler/habitats/:habitatId/registration", async (c) => c.json(await fetchKeplerHabitatRegistration(c.req.param("habitatId"))));
   app.get("/commands/registration/details", async (c) => {
     console.log("[action] inspect registration details");

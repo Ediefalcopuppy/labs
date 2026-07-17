@@ -1,4 +1,4 @@
-import { fetchKeplerJson, postKeplerJson } from "./client";
+import { fetchKeplerJson, patchKeplerJson, postKeplerJson } from "./client";
 import type { RegistrationStream } from "../clock/types";
 import type {
   RegistrationContracts,
@@ -437,6 +437,24 @@ export async function fetchKeplerResourceCatalog(): Promise<KeplerResourceCatalo
 export async function fetchKeplerSolarIrradiance(): Promise<number> {
   const payload = (await fetchKeplerJson("/world/solar-irradiance", "habitat tick")) as KeplerSolarIrradianceResponse;
   return extractSolarIrradiance(payload);
+}
+
+export type AdminSolarIrradianceUpdate = {
+  mode: string;
+  manualIrradianceWPerM2: number;
+  effectiveIrradianceWPerM2: number;
+  condition: string;
+  updatedBy: string;
+};
+
+export async function updateKeplerSolarIrradiance(
+  update: AdminSolarIrradianceUpdate,
+): Promise<unknown> {
+  return patchKeplerJson(
+    "/admin/world/solar-irradiance",
+    update,
+    "habitat solar set",
+  );
 }
 
 export async function fetchKeplerHabitatRegistration(habitatId: string): Promise<KeplerHabitat> {

@@ -46,3 +46,25 @@ export async function postKeplerJson(
 
   return response.json();
 }
+
+export async function patchKeplerJson(
+  path: string,
+  body: unknown,
+  commandHint: string,
+): Promise<unknown> {
+  const token = readKeplerToken(commandHint);
+  const response = await fetch(`${keplerBaseUrl}${path}`, {
+    method: "PATCH",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Failed to update Kepler data: ${response.status} ${response.statusText}.`);
+  }
+
+  return response.json();
+}

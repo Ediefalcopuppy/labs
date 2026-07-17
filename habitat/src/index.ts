@@ -4,7 +4,7 @@ import { Command, InvalidArgumentError } from "commander";
 import { randomUUID } from "node:crypto";
 import { copyFile, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { deleteBackendCommand, getBackendCommand, getBackendState, getLocalOperatorCommand, postBackendCommand, saveBackendState } from "./client";
+import { deleteBackendCommand, getBackendCommand, getBackendState, getLocalOperatorCommand, patchBackendCommand, postBackendCommand, saveBackendState } from "./client";
 import { normalizeState } from "./state/service";
 import { readJsonFile, readSqliteState, writeSqliteState } from "./storage";
 import type {
@@ -689,6 +689,16 @@ function parseIntegerInRange(value: string, fieldName: string, min: number, max:
   return parsed;
 }
 
+function parseNumberInRange(value: string, fieldName: string, min: number, max: number): number {
+  const parsed = Number(value);
+
+  if (!Number.isFinite(parsed) || parsed < min || parsed > max) {
+    throw new InvalidArgumentError(`${fieldName} must be between ${min} and ${max}.`);
+  }
+
+  return parsed;
+}
+
 function parseInventoryAmount(value: string): number {
   const amount = Number(value);
 
@@ -1239,6 +1249,44 @@ Examples:
     console.log(`Solar factor: ${normalizedSolarFactor}`);
     console.log(`Charger modules: ${chargers.length}`);
     console.log(`Estimated charger output per tick: ${totalChargePerTick}`);
+  });
+
+solarCommand
+  .command("set-irradiance")
+  .description("Admin: update Kepler habitat solar irradiance.")
+  .requiredOption("--mode <mode>", "Kepler irradiance mode")
+  .requiredOption("--manual-irradiance-w-per-m2 <0-900>", "manual irradiance in watts per square meter", (value) =>
+    parseNumberInRange(value, "manualIrradianceWPerM2", 0, 900),
+  )
+  .requiredOption(
+    "--effective-irradiance-w-per-m2 <0-900>",
+    "effective irradiance in watts per square meter",
+    (value) => parseNumberInRange(value, "effectiveIrradianceWPerM2", 0, 900),
+  )
+  .requiredOption("--condition <condition>", "Kepler irradiance condition")
+  .option("--updated-by <updatedBy>", "audit actor", "instructor")
+  .option("--json", "print the complete JSON response")
+  .action(async (options: {
+    mode: string;
+    manualIrradianceWPerM2: number;
+    effectiveIrradianceWPerM2: number;
+    condition: string;
+    updatedBy: string;
+    json?: boolean;
+  }) => {
+    const result = await patchBackendCommand<unknown>("/commands/solar/irradiance", {
+      mode: options.mode,
+      manualIrradianceWPerM2: options.manualIrradianceWPerM2,
+      effectiveIrradianceWPerM2: options.effectiveIrradianceWPerM2,
+      condition: options.condition,
+      updatedBy: options.updatedBy,
+    });
+    if (options.json) {
+      console.log(JSON.stringify(result, null, 2));
+      return;
+    }
+    console.log("Solar irradiance updated.");
+    for (const line of formatObjectLines(result)) console.log(line);
   });
 
 solarCommand.on("command:*", ([command]) => {

@@ -134,6 +134,16 @@ export async function putBackendJson(path: string, body?: unknown): Promise<unkn
   });
 }
 
+export async function patchBackendJson(path: string, body?: unknown): Promise<unknown> {
+  return requestBackendJson(path, {
+    method: "PATCH",
+    headers: {
+      "content-type": "application/json",
+    },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+}
+
 export async function deleteBackendJson(path: string): Promise<unknown> {
   return requestBackendJson(path, { method: "DELETE" });
 }
@@ -158,6 +168,10 @@ export async function fetchBackendEventStream(
 
 export async function postBackendCommand<T>(path: string, body?: unknown): Promise<T> {
   return (await postBackendJson(path, body)) as T;
+}
+
+export async function patchBackendCommand<T>(path: string, body?: unknown): Promise<T> {
+  return (await patchBackendJson(path, body)) as T;
 }
 
 export async function getBackendCommand<T>(path: string): Promise<T> {
